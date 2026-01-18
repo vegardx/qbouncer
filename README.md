@@ -159,14 +159,40 @@ sudo systemctl stop qbouncer
 3. **qBittorrent Sync**: If the mapped port changes, updates qBittorrent's listening port via its Web API
 4. **Interface Binding**: Verifies qBittorrent is bound to the VPN interface to prevent IP leaks
 
-### State Machine
+### How It Works (Sequence)
 
-```
-INITIALIZING -> WAITING_VPN -> WAITING_QBT -> MAPPING_PORT -> CONFIGURING -> MONITORING
-                    ^              ^                              |              |
-                    |              |                              v              |
-                    |              +----------- RECOVERING <---------------------+
-                    +----------------------------------------------------------+
+```mermaid
+sequenceDiagram
+    participant S as qbouncer
+    participant WG as WireGuard
+    participant NAT as NAT-PMP Gateway
+    participant QB as qBittorrent
+
+    loop Health Check
+        S->>WG: Check interface UP?
+        WG-->>S: UP with IP
+        S->>WG: Ping gateway
+        WG-->>S: Reachable
+    end
+
+    S->>QB: Check API available?
+    QB-->>S: OK (version)
+
+    loop Port Refresh (every 60s)
+        S->>NAT: Request TCP mapping
+        NAT-->>S: Public port 12345
+        S->>NAT: Request UDP mapping
+        NAT-->>S: Public port 12345
+        
+        alt Port changed
+            S->>QB: Set listen_port=12345
+            S->>QB: Set interface=wg0
+            QB-->>S: OK
+        end
+    end
+
+    Note over S: On SIGTERM/SIGINT
+    S->>S: Save state & exit
 ```
 
 ## Troubleshooting
