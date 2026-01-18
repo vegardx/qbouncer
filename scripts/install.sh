@@ -332,9 +332,10 @@ EOF
     info "Configuration written to $CONFIG_FILE"
 fi
 
-# Set ownership so qbouncer user can read config
-chown -R root:"$SERVICE_USER" "$CONFIG_DIR"
+# Always fix ownership and permissions (idempotent)
+chown root:"$SERVICE_USER" "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
+chown root:"$SERVICE_USER" "$CONFIG_FILE"
 chmod 640 "$CONFIG_FILE"
 
 # Step 6: Install systemd service (idempotent)
