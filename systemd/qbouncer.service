@@ -1,0 +1,51 @@
+[Unit]
+Description=qBouncer - WireGuard NAT-PMP Port Bouncer for qBittorrent
+Documentation=https://github.com/vegardx/qbouncer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/opt/qbouncer/venv/bin/qbouncer --config /etc/qbouncer/qbouncer.toml
+
+# Watchdog configuration
+WatchdogSec=90
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+User=qbouncer
+Group=qbouncer
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Required capabilities for ping
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# Directories
+RuntimeDirectory=qbouncer
+StateDirectory=qbouncer
+ConfigurationDirectory=qbouncer
+
+# Allow reading wireguard config (for wg show)
+ReadOnlyPaths=/etc/wireguard
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qbouncer
+
+[Install]
+WantedBy=multi-user.target
