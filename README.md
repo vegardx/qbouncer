@@ -24,70 +24,68 @@ Designed for use with ProtonVPN's port forwarding feature, but should work with 
 
 ## Installation
 
-### Quick install (recommended)
+### Automatic (recommended)
+
+The installer will guide you through the setup interactively:
 
 ```bash
-# Install system dependencies (Debian/Ubuntu)
-sudo apt install python3 python3-venv libnatpmp1 wireguard-tools
-
-# Clone the repository
-git clone https://github.com/vegardx/qbouncer.git
-cd qbouncer
-
-# Run the install script
-sudo ./scripts/install.sh
-
-# Edit configuration
-sudo nano /etc/qbouncer/qbouncer.toml
-
-# Enable and start the service
-sudo systemctl enable qbouncer
-sudo systemctl start qbouncer
+curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
 ```
 
-### Manual installation
+Or with options for non-interactive install:
 
-If you prefer to install manually using a virtual environment:
+```bash
+curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash -s -- \
+  --wg-interface wg0 \
+  --gateway 10.2.0.1 \
+  --qbt-port 8080 \
+  --non-interactive
+```
+
+The installer is idempotent and can be run multiple times safely to upgrade or reconfigure.
+
+### Manual
 
 ```bash
 # Install system dependencies (Debian/Ubuntu)
-sudo apt install python3 python3-venv libnatpmp1 wireguard-tools
+apt install python3 python3-venv libnatpmp1 wireguard-tools
 
 # Clone the repository
 git clone https://github.com/vegardx/qbouncer.git
 cd qbouncer
 
 # Create service user
-sudo useradd -r -s /usr/sbin/nologin qbouncer
+useradd -r -s /usr/sbin/nologin qbouncer
 
 # Create installation directory and virtual environment
-sudo mkdir -p /opt/qbouncer
-sudo python3 -m venv /opt/qbouncer/venv
+mkdir -p /opt/qbouncer
+python3 -m venv /opt/qbouncer/venv
 
 # Install qbouncer into the virtual environment
-sudo /opt/qbouncer/venv/bin/pip install .
+/opt/qbouncer/venv/bin/pip install .
 
 # Setup configuration
-sudo mkdir -p /etc/qbouncer
-sudo cp config/qbouncer.toml.example /etc/qbouncer/qbouncer.toml
-sudo nano /etc/qbouncer/qbouncer.toml
+mkdir -p /etc/qbouncer
+cp config/qbouncer.toml.example /etc/qbouncer/qbouncer.toml
+chmod 600 /etc/qbouncer/qbouncer.toml
+nano /etc/qbouncer/qbouncer.toml
 
 # Install and enable systemd service
-sudo cp systemd/qbouncer.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable qbouncer
-sudo systemctl start qbouncer
+cp systemd/qbouncer.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable qbouncer
+systemctl start qbouncer
 ```
 
 ### Uninstallation
 
 ```bash
-sudo ./scripts/uninstall.sh
+./scripts/uninstall.sh
 ```
 
 ## Configuration
 
-Copy `config/qbouncer.toml.example` to `/etc/qbouncer/qbouncer.toml` and adjust:
+Configuration file: `/etc/qbouncer/qbouncer.toml`
 
 ```toml
 [wireguard]
@@ -102,7 +100,11 @@ lease_lifetime = 120
 
 [qbittorrent]
 host = "localhost"
-port = 80
+port = 8080
+# use_https = false
+# verify_ssl = true
+# username = "admin"
+# password = "secret"
 interface_binding = "wg0"
 
 [service]
@@ -127,22 +129,22 @@ QBOUNCER_LOG_LEVEL=DEBUG
 
 ```bash
 # Start the service
-sudo systemctl start qbouncer
+systemctl start qbouncer
 
 # Check status
-sudo systemctl status qbouncer
+systemctl status qbouncer
 
 # View logs
-sudo journalctl -u qbouncer -f
+journalctl -u qbouncer -f
 
 # Stop the service
-sudo systemctl stop qbouncer
+systemctl stop qbouncer
 ```
 
 ### Manual execution
 
 ```bash
-# Run with default config (if installed via venv)
+# Run with default config
 /opt/qbouncer/venv/bin/qbouncer
 
 # Run with custom config file
@@ -159,7 +161,7 @@ sudo systemctl stop qbouncer
 3. **qBittorrent Sync**: If the mapped port changes, updates qBittorrent's listening port via its Web API
 4. **Interface Binding**: Verifies qBittorrent is bound to the VPN interface to prevent IP leaks
 
-### How It Works (Sequence)
+### Sequence Diagram
 
 ```mermaid
 sequenceDiagram
@@ -204,10 +206,10 @@ sequenceDiagram
 ip link show wg0
 
 # Check connectivity
-ping -I wg2 10.2.0.1
+ping -I wg0 10.2.0.1
 
 # Verify handshake
-sudo wg show wg0
+wg show wg0
 ```
 
 ### Check if NAT-PMP is working
@@ -221,20 +223,20 @@ natpmpc -a 1 0 tcp 60 -g 10.2.0.1
 
 ```bash
 # Get current preferences
-curl http://localhost:80/api/v2/app/preferences | jq .listen_port
+curl http://localhost:8080/api/v2/app/preferences | jq .listen_port
 ```
 
 ### View service logs
 
 ```bash
 # Full logs
-sudo journalctl -u qbouncer
+journalctl -u qbouncer
 
 # Follow logs
-sudo journalctl -u qbouncer -f
+journalctl -u qbouncer -f
 
 # Logs since last boot
-sudo journalctl -u qbouncer -b
+journalctl -u qbouncer -b
 ```
 
 ## License
