@@ -267,8 +267,22 @@ class QBouncerService:
                 logger.info("Port mapping obtained: %d", new_port)
                 self.state = ServiceState.CONFIGURING
             else:
-                logger.debug("Port unchanged: %d", new_port)
-                self.state = ServiceState.MONITORING
+                # Port unchanged from NAT-PMP, but verify qBittorrent matches (catch drift)
+                try:
+                    qbt_port = self.qbt_client.get_listening_port()
+                    if qbt_port != new_port:
+                        logger.warning(
+                            "qBittorrent port drifted: expected %d, got %d",
+                            new_port,
+                            qbt_port,
+                        )
+                        self.state = ServiceState.CONFIGURING
+                    else:
+                        logger.debug("Port unchanged: %d", new_port)
+                        self.state = ServiceState.MONITORING
+                except QBittorrentError as e:
+                    logger.warning("Failed to verify qBittorrent port: %s", e)
+                    self.state = ServiceState.CONFIGURING
 
             self._save_state()
 
