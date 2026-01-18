@@ -1,0 +1,66 @@
+# qbouncer configuration file
+# Copy to /etc/qbouncer/qbouncer.toml and adjust as needed
+
+[wireguard]
+# WireGuard interface name
+interface = "wg0"
+
+# Host to ping for health checks (usually the VPN gateway)
+health_check_host = "10.2.0.1"
+
+# Interval between VPN health checks in seconds
+health_check_interval = 30
+
+[natpmp]
+# NAT-PMP gateway IP address
+gateway = "10.2.0.1"
+
+# Interval between port mapping refreshes in seconds
+refresh_interval = 60
+
+# Requested port mapping lease lifetime in seconds
+# Should be greater than refresh_interval
+lease_lifetime = 120
+
+[qbittorrent]
+# qBittorrent Web UI host
+host = "localhost"
+
+# qBittorrent Web UI port
+port = 80
+
+# Use HTTPS instead of HTTP for Web UI connection
+use_https = false
+
+# Verify SSL certificates (only applies when use_https = true)
+# Set to false for self-signed certificates
+verify_ssl = true
+
+# Optional: username for Web UI authentication
+# Leave empty if authentication is disabled
+# username = "admin"
+
+# Optional: password for Web UI authentication
+# Leave empty if authentication is disabled
+# Can also be set via QBOUNCER_QBT_PASSWORD environment variable
+# password = ""
+
+# Network interface qBittorrent should bind to
+# This ensures torrent traffic goes through the VPN
+interface_binding = "wg0"
+
+[service]
+# Log level: DEBUG, INFO, WARNING, ERROR
+log_level = "INFO"
+
+# Path to state file for persistence across restarts
+state_file = "/var/lib/qbouncer/state.json"
+
+# Maximum consecutive failures before entering recovery mode
+max_consecutive_failures = 5
+
+# Base delay for exponential backoff in seconds
+failure_backoff_base = 5
+
+# Maximum delay for exponential backoff in seconds
+failure_backoff_max = 300
