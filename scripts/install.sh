@@ -173,6 +173,10 @@ if ! check_command wg; then
     MISSING_DEPS+=("wireguard-tools")
 fi
 
+if ! check_command git; then
+    MISSING_DEPS+=("git")
+fi
+
 if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     warn "Missing dependencies: ${MISSING_DEPS[*]}"
 
