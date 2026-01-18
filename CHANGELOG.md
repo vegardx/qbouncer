@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2025-01-18
+
+### Changed
+
+- Rewrite install.sh as interactive, pipe-able installer with auto-detection
+- Installer is now idempotent (safe to re-run for upgrades)
+- Remove sudo from documentation (assume root context)
+
+### Added
+
+- Non-interactive install mode via `--non-interactive` flag
+- Auto-detection of WireGuard interface and gateway
+- .gitignore for Python cache and build artifacts
+
 ## [1.0.0] - 2025-01-18
 
 ### Added
