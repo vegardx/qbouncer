@@ -87,6 +87,7 @@ Options:
     --qbt-username USER     qBittorrent username
     --qbt-password PASS     qBittorrent password
     --non-interactive       Skip prompts, use defaults/CLI args only
+    --force-config          Overwrite existing configuration file
     -h, --help              Show this help message
 
 Examples:
@@ -98,12 +99,16 @@ Examples:
 
     # Pipe from curl
     curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
+
+    # Reinstall with new config
+    $0 --non-interactive --force-config --wg-interface wg2 --qbt-port 80
 EOF
     exit 0
 }
 
 # Parse arguments
 NON_INTERACTIVE=false
+FORCE_CONFIG=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --wg-interface) WG_INTERFACE="$2"; shift 2 ;;
@@ -113,6 +118,7 @@ while [[ $# -gt 0 ]]; do
         --qbt-username) QBT_USERNAME="$2"; shift 2 ;;
         --qbt-password) QBT_PASSWORD="$2"; shift 2 ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
+        --force-config) FORCE_CONFIG=true; shift ;;
         -h|--help) usage ;;
         *) error "Unknown option: $1" ;;
     esac
@@ -276,15 +282,20 @@ mkdir -p "$CONFIG_DIR"
 CONFIG_FILE="$CONFIG_DIR/qbouncer.toml"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-    info "Configuration file exists, preserving..."
     if [[ "$INTERACTIVE" == "true" ]]; then
+        info "Configuration file exists"
         read -rp "$(echo -e "${YELLOW}Overwrite existing config? [y/N]:${NC} ")" overwrite
         if [[ "$overwrite" =~ ^[Yy]$ ]]; then
             WRITE_CONFIG=true
         else
             WRITE_CONFIG=false
+            info "Preserving existing configuration"
         fi
+    elif [[ "$FORCE_CONFIG" == "true" ]]; then
+        info "Overwriting configuration (--force-config)"
+        WRITE_CONFIG=true
     else
+        info "Configuration file exists, preserving (use --force-config to overwrite)"
         WRITE_CONFIG=false
     fi
 else
