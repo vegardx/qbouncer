@@ -285,9 +285,10 @@ GIT_REF="${RELEASE:-main}"
 info "Downloading qbouncer ($GIT_REF)..."
 git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer" 2>/dev/null
 
-# Install package
+# Install package (uninstall first to ensure clean install)
+"$INSTALL_DIR/venv/bin/pip" uninstall -y qbouncer 2>/dev/null || true
 info "Installing package..."
-"$INSTALL_DIR/venv/bin/pip" install --force-reinstall --no-cache-dir "$TEMP_DIR/qbouncer" -q
+"$INSTALL_DIR/venv/bin/pip" install --no-cache-dir "$TEMP_DIR/qbouncer" -q
 
 # Verify installation
 VERSION=$("$INSTALL_DIR/venv/bin/qbouncer" --version 2>/dev/null || echo "unknown")
