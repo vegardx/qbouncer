@@ -187,6 +187,10 @@ if ! check_command wg; then
     MISSING_DEPS+=("wireguard-tools")
 fi
 
+if ! check_command iptables; then
+    MISSING_DEPS+=("iptables")
+fi
+
 if ! check_command git; then
     MISSING_DEPS+=("git")
 fi
