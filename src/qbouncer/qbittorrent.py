@@ -185,7 +185,7 @@ class QBittorrentClient:
             Interface name or empty string if any/all interfaces
         """
         prefs = self.get_preferences()
-        interface = prefs.get("current_interface_name", "")
+        interface = prefs.get("current_network_interface", "")
         logger.debug("Current qBittorrent network interface: '%s'", interface)
         return interface
 
@@ -196,7 +196,7 @@ class QBittorrentClient:
             interface: Interface name (e.g., wg2)
         """
         logger.info("Setting qBittorrent network interface to '%s'", interface)
-        self.set_preferences({"current_interface_name": interface})
+        self.set_preferences({"current_network_interface": interface})
 
     def verify_interface_binding(self, expected: str) -> bool:
         """Verify qBittorrent is bound to the expected interface.
@@ -226,7 +226,7 @@ class QBittorrentClient:
         self.set_preferences(
             {
                 "listen_port": port,
-                "current_interface_name": interface,
+                "current_network_interface": interface,
             }
         )
 
