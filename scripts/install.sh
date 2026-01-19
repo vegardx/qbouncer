@@ -239,6 +239,11 @@ else
     info "Using WireGuard interface: $WG_INTERFACE"
     info "Using NAT-PMP gateway: $WG_GATEWAY"
     info "Using qBittorrent: $QBT_HOST:$QBT_PORT"
+    if [[ "$KILLSWITCH_ENABLED" == "true" ]]; then
+        info "Killswitch: enabled (user: ${KILLSWITCH_USER:-qbittorrent})"
+    else
+        info "Killswitch: disabled"
+    fi
 fi
 
 # Step 3: Create service user (idempotent)
