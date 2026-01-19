@@ -38,7 +38,6 @@ Or with options for non-interactive install:
 curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash -s -- \
   --non-interactive \
   --force-config \
-  --release v1.1.2 \
   --wg-interface wg0 \
   --gateway 10.2.0.1 \
   --qbt-host localhost \
