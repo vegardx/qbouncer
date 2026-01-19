@@ -30,9 +30,11 @@ RestrictSUIDSGID=yes
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
 
-# Required capabilities for ping
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
+# Required capabilities
+# CAP_NET_RAW: ping for health checks
+# CAP_NET_ADMIN: iptables for killswitch (optional feature)
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 
 # Directories
 RuntimeDirectory=qbouncer

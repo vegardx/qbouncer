@@ -16,7 +16,7 @@ INSTALL_DIR="/opt/qbouncer"
 CONFIG_DIR="/etc/qbouncer"
 SERVICE_USER="qbouncer"
 REPO_URL="https://github.com/vegardx/qbouncer.git"
-BRANCH="main"
+RELEASE=""
 
 # Configuration defaults
 WG_INTERFACE=""
@@ -25,6 +25,8 @@ QBT_HOST="localhost"
 QBT_PORT=""
 QBT_USERNAME=""
 QBT_PASSWORD=""
+KILLSWITCH_ENABLED=false
+KILLSWITCH_USER=""
 
 # Colors
 RED='\033[0;31m'
@@ -86,6 +88,9 @@ Options:
     --qbt-port PORT         qBittorrent Web UI port
     --qbt-username USER     qBittorrent username
     --qbt-password PASS     qBittorrent password
+    --killswitch            Enable iptables killswitch
+    --killswitch-user USER  User running qBittorrent (for killswitch)
+    --release TAG           Install specific release tag (default: latest from main)
     --non-interactive       Skip prompts, use defaults/CLI args only
     --force-config          Overwrite existing configuration file
     -h, --help              Show this help message
@@ -117,6 +122,9 @@ while [[ $# -gt 0 ]]; do
         --qbt-port) QBT_PORT="$2"; shift 2 ;;
         --qbt-username) QBT_USERNAME="$2"; shift 2 ;;
         --qbt-password) QBT_PASSWORD="$2"; shift 2 ;;
+        --killswitch) KILLSWITCH_ENABLED=true; shift ;;
+        --killswitch-user) KILLSWITCH_USER="$2"; shift 2 ;;
+        --release) RELEASE="$2"; shift 2 ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --force-config) FORCE_CONFIG=true; shift ;;
         -h|--help) usage ;;
@@ -263,8 +271,10 @@ fi
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
-info "Downloading qbouncer..."
-git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$TEMP_DIR/qbouncer" 2>/dev/null
+# Determine which branch/tag to clone
+GIT_REF="${RELEASE:-main}"
+info "Downloading qbouncer ($GIT_REF)..."
+git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer" 2>/dev/null
 
 # Install package
 info "Installing package..."
@@ -338,7 +348,14 @@ state_file = "/var/lib/qbouncer/state.json"
 max_consecutive_failures = 5
 failure_backoff_base = 5
 failure_backoff_max = 300
+
+[killswitch]
+enabled = $KILLSWITCH_ENABLED
 EOF
+
+    if [[ -n "$KILLSWITCH_USER" ]]; then
+        echo "user = \"$KILLSWITCH_USER\"" >> "$CONFIG_FILE"
+    fi
 
     info "Configuration written to $CONFIG_FILE"
 fi
@@ -391,8 +408,10 @@ LockPersonality=yes
 ReadOnlyPaths=/etc/wireguard
 ReadWritePaths=/var/lib/qbouncer
 
-CapabilityBoundingSet=CAP_NET_RAW
-AmbientCapabilities=CAP_NET_RAW
+# CAP_NET_RAW: ping for health checks
+# CAP_NET_ADMIN: iptables for killswitch (optional feature)
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
@@ -434,4 +453,10 @@ echo "  nano $CONFIG_FILE  - Edit configuration"
 echo
 echo "Configuration: $CONFIG_FILE"
 echo "Logs: journalctl -u qbouncer"
+echo
+echo -e "${YELLOW}Optional: Killswitch${NC}"
+echo "To prevent traffic leaks outside VPN, add to config:"
+echo "  [killswitch]"
+echo "  enabled = true"
+echo "  user = \"<user running qBittorrent>\""
 echo

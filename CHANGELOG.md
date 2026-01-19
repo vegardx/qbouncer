@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-01-19
+
+### Added
+
+- Killswitch feature using iptables to prevent qBittorrent traffic leaks outside VPN
+- New `[killswitch]` configuration section with `enabled` and `user` options
+- Killswitch uses custom iptables chain `QBOUNCER-KS` for clean rule management
+- Automatic cleanup of iptables rules on service shutdown
+- Periodic verification of killswitch rules during monitoring
+- Installer options: `--killswitch`, `--killswitch-user`, `--release`
+
+### Changed
+
+- systemd service now includes CAP_NET_ADMIN capability for iptables management
+
 ## [1.0.6] - 2025-01-18
 
 ### Added

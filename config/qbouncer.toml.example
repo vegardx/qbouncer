@@ -64,3 +64,14 @@ failure_backoff_base = 5
 
 # Maximum delay for exponential backoff in seconds
 failure_backoff_max = 300
+
+[killswitch]
+# Enable iptables killswitch to prevent traffic leaks outside VPN
+# When enabled, the specified user can only route traffic through
+# the VPN interface (and localhost for Web UI access)
+# Requires CAP_NET_ADMIN capability (granted by systemd service)
+enabled = false
+
+# User running qBittorrent (traffic will be restricted for this user)
+# This should match the user that qBittorrent runs as
+user = "qbittorrent"

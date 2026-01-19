@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import pwd
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,6 +65,10 @@ class Config:
     failure_backoff_base: int = 5
     failure_backoff_max: int = 300
 
+    # Killswitch settings
+    killswitch_enabled: bool = False
+    killswitch_user: str = "qbittorrent"
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         self._validate()
@@ -119,6 +124,16 @@ class Config:
             raise ConfigError(
                 f"Invalid log level: {self.log_level!r}. Must be one of {valid_levels}"
             )
+
+        # Killswitch validation
+        if self.killswitch_enabled:
+            try:
+                pwd.getpwnam(self.killswitch_user)
+            except KeyError:
+                raise ConfigError(
+                    f"Killswitch user not found: {self.killswitch_user!r}. "
+                    "Ensure the user exists or disable killswitch."
+                )
 
     def __repr__(self) -> str:
         """Return representation with masked credentials."""
@@ -184,6 +199,9 @@ class Config:
             "max_consecutive_failures": ("service", "max_consecutive_failures", int),
             "failure_backoff_base": ("service", "failure_backoff_base", int),
             "failure_backoff_max": ("service", "failure_backoff_max", int),
+            # Killswitch
+            "killswitch_enabled": ("killswitch", "enabled", _parse_bool),
+            "killswitch_user": ("killswitch", "user", str),
         }
 
         # Get default values from dataclass

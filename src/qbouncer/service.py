@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any, TypeAlias
 
 from .config import Config
-from .exceptions import NatPmpError, QBittorrentError, QBouncerError
+from .exceptions import KillswitchError, NatPmpError, QBittorrentError, QBouncerError
+from .killswitch import KillswitchManager
 from .natpmp import NatPmpManager
 from .qbittorrent import QBittorrentClient
 from .wireguard import WireGuardMonitor
@@ -88,6 +89,14 @@ class QBouncerService:
 
         # State tracking
         self.state_data = ServiceStateData()
+
+        # Initialize killswitch if enabled
+        self.killswitch: KillswitchManager | None = None
+        if config.killswitch_enabled:
+            self.killswitch = KillswitchManager(
+                vpn_interface=config.wg_interface,
+                user=config.killswitch_user,
+            )
 
         # Load persisted state
         self._load_state()
@@ -193,6 +202,8 @@ class QBouncerService:
         logger.info("WireGuard interface: %s", self.config.wg_interface)
         logger.info("NAT-PMP gateway: %s", self.config.natpmp_gateway)
         logger.info("qBittorrent: %s:%d", self.config.qbt_host, self.config.qbt_port)
+        if self.killswitch:
+            logger.info("Killswitch: enabled for user %s", self.config.killswitch_user)
 
         # Transition to waiting for VPN
         self.state = ServiceState.WAITING_VPN
@@ -234,6 +245,16 @@ class QBouncerService:
 
         if self.wg_monitor.is_healthy():
             logger.info("WireGuard VPN is healthy")
+
+            # Setup killswitch now that VPN is up
+            if self.killswitch:
+                try:
+                    self.killswitch.setup()
+                except KillswitchError as e:
+                    logger.error("Failed to setup killswitch: %s", e)
+                    self._handle_failure()
+                    return
+
             self.state_data.consecutive_failures = 0
             self.state = ServiceState.WAITING_QBT
         else:
@@ -376,6 +397,15 @@ class QBouncerService:
             self.state = ServiceState.WAITING_QBT
             return
 
+        # Verify killswitch is still active
+        if self.killswitch and not self.killswitch.verify():
+            logger.warning("Killswitch rules missing, re-establishing")
+            try:
+                self.killswitch.setup()
+            except KillswitchError as e:
+                logger.error("Failed to re-establish killswitch: %s", e)
+                self._handle_failure()
+
         # Sleep until next check
         time.sleep(
             min(
@@ -412,6 +442,13 @@ class QBouncerService:
     def _cleanup(self) -> None:
         """Cleanup on shutdown."""
         logger.info("Shutting down qbouncer service")
+
+        # Remove killswitch rules
+        if self.killswitch:
+            try:
+                self.killswitch.cleanup()
+            except Exception as e:
+                logger.error("Failed to cleanup killswitch: %s", e)
 
         # Save final state
         self._save_state()

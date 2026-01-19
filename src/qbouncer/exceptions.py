@@ -6,6 +6,7 @@ __all__ = [
     "WireGuardError",
     "NatPmpError",
     "QBittorrentError",
+    "KillswitchError",
 ]
 
 
@@ -27,3 +28,7 @@ class NatPmpError(QBouncerError):
 
 class QBittorrentError(QBouncerError):
     """qBittorrent API error."""
+
+
+class KillswitchError(QBouncerError):
+    """Killswitch-related error."""
