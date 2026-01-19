@@ -101,7 +101,7 @@ Examples:
     curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
 
     # Reinstall with new config
-    $0 --non-interactive --force-config --wg-interface wg2 --qbt-port 80
+    $0 --non-interactive --force-config --wg-interface wg0 --qbt-port 80
 EOF
     exit 0
 }
