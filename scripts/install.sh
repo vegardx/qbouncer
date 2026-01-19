@@ -459,9 +459,11 @@ echo
 echo "Configuration: $CONFIG_FILE"
 echo "Logs: journalctl -u qbouncer"
 echo
-echo -e "${YELLOW}Optional: Killswitch${NC}"
-echo "To prevent traffic leaks outside VPN, add to config:"
-echo "  [killswitch]"
-echo "  enabled = true"
-echo "  user = \"<user running qBittorrent>\""
-echo
+if [[ "$KILLSWITCH_ENABLED" != "true" ]]; then
+    echo -e "${YELLOW}Optional: Killswitch${NC}"
+    echo "To prevent traffic leaks outside VPN, add to config:"
+    echo "  [killswitch]"
+    echo "  enabled = true"
+    echo "  user = \"<user running qBittorrent>\""
+    echo
+fi
