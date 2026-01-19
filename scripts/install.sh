@@ -287,7 +287,7 @@ git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer" 2>/dev/
 
 # Install package
 info "Installing package..."
-"$INSTALL_DIR/venv/bin/pip" install "$TEMP_DIR/qbouncer" -q
+"$INSTALL_DIR/venv/bin/pip" install --force-reinstall --no-cache-dir "$TEMP_DIR/qbouncer" -q
 
 # Verify installation
 VERSION=$("$INSTALL_DIR/venv/bin/qbouncer" --version 2>/dev/null || echo "unknown")
