@@ -85,9 +85,7 @@ class KillswitchManager:
                 timeout=30,
             )
         except subprocess.CalledProcessError as e:
-            raise KillswitchError(
-                f"{cmd[0]} failed: {' '.join(cmd)}\nstderr: {e.stderr}"
-            ) from e
+            raise KillswitchError(f"{cmd[0]} failed: {' '.join(cmd)}\nstderr: {e.stderr}") from e
         except subprocess.TimeoutExpired as e:
             raise KillswitchError(f"{cmd[0]} timed out: {' '.join(cmd)}") from e
         except FileNotFoundError as e:
@@ -156,9 +154,16 @@ class KillswitchManager:
         """Remove jump rule first, then flush+delete chain. Idempotent."""
         uid = self._get_uid()
         jump_spec = [
-            "-t", self.TABLE, "-D", "OUTPUT",
-            "-m", "owner", "--uid-owner", str(uid),
-            "-j", self.CHAIN_NAME,
+            "-t",
+            self.TABLE,
+            "-D",
+            "OUTPUT",
+            "-m",
+            "owner",
+            "--uid-owner",
+            str(uid),
+            "-j",
+            self.CHAIN_NAME,
         ]
         # Remove jumps first (fail-closed-ish: traffic stops going through our chain)
         for _ in range(16):  # defensively handle administrator-added duplicates
@@ -205,23 +210,41 @@ class KillswitchManager:
                 logger.warning("%s killswitch chain missing", binary)
                 return False
             jump_spec = [
-                "-t", self.TABLE, "-C", "OUTPUT",
-                "-m", "owner", "--uid-owner", str(uid),
-                "-j", self.CHAIN_NAME,
+                "-t",
+                self.TABLE,
+                "-C",
+                "OUTPUT",
+                "-m",
+                "owner",
+                "--uid-owner",
+                str(uid),
+                "-j",
+                self.CHAIN_NAME,
             ]
             result = self._run([binary, *jump_spec], check=False)
             if result.returncode != 0:
                 logger.warning("%s killswitch jump rule missing", binary)
                 return False
             vpn_rule = [
-                "-t", self.TABLE, "-C", self.CHAIN_NAME,
-                "-o", self.vpn_interface, "-j", "ACCEPT",
+                "-t",
+                self.TABLE,
+                "-C",
+                self.CHAIN_NAME,
+                "-o",
+                self.vpn_interface,
+                "-j",
+                "ACCEPT",
             ]
             if self._run([binary, *vpn_rule], check=False).returncode != 0:
                 logger.warning("%s killswitch VPN rule missing", binary)
                 return False
             reject_rule = [
-                "-t", self.TABLE, "-C", self.CHAIN_NAME, "-j", "REJECT",
+                "-t",
+                self.TABLE,
+                "-C",
+                self.CHAIN_NAME,
+                "-j",
+                "REJECT",
             ]
             if self._run([binary, *reject_rule], check=False).returncode != 0:
                 logger.warning("%s killswitch reject rule missing", binary)

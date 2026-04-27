@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from ipaddress import AddressValueError, IPv4Address
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -216,6 +217,6 @@ class Config:
         """Load configuration from TOML file."""
         try:
             with open(path, "rb") as f:
-                return cast(dict[str, Any], tomllib.load(f))
+                return tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"Invalid TOML in config file: {e}") from e

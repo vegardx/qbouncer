@@ -78,9 +78,7 @@ class TestRequest:
 
 
 class TestRefresh:
-    def test_returns_port_when_tcp_and_udp_match(
-        self, fake_subprocess_run: MagicMock
-    ) -> None:
+    def test_returns_port_when_tcp_and_udp_match(self, fake_subprocess_run: MagicMock) -> None:
         fake_subprocess_run.return_value = _completed(stdout=GOOD_OUTPUT)
         mgr = NatPmpManager("10.0.0.1")
         assert mgr.refresh_mapping() == 42123
@@ -88,9 +86,7 @@ class TestRefresh:
     def test_warns_but_returns_tcp_when_udp_differs(
         self, fake_subprocess_run: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
-        udp_output = (
-            "Mapped public port 9999 protocol UDP to local port 1 lifetime 60\n"
-        )
+        udp_output = "Mapped public port 9999 protocol UDP to local port 1 lifetime 60\n"
         fake_subprocess_run.side_effect = [
             _completed(stdout=GOOD_OUTPUT),
             _completed(stdout=udp_output),

@@ -18,9 +18,11 @@ def service(tmp_path: Path) -> QBouncerService:
     """A service wired to tmp_path state file, with all external deps mocked."""
     state_file = tmp_path / "state.json"
     cfg = Config(state_file=str(state_file))
-    with patch("qbouncer.service.WireGuardMonitor"), \
-         patch("qbouncer.service.NatPmpManager"), \
-         patch("qbouncer.service.QBittorrentClient"):
+    with (
+        patch("qbouncer.service.WireGuardMonitor"),
+        patch("qbouncer.service.NatPmpManager"),
+        patch("qbouncer.service.QBittorrentClient"),
+    ):
         svc = QBouncerService(cfg)
     return svc
 
@@ -28,11 +30,10 @@ def service(tmp_path: Path) -> QBouncerService:
 class TestStatePersistence:
     def test_save_then_load_roundtrip(self, service: QBouncerService) -> None:
         from datetime import datetime, timezone
+
         service.state_data.current_port = 42123
         service.state_data.consecutive_failures = 2
-        service.state_data.last_port_refresh = datetime(
-            2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc
-        )
+        service.state_data.last_port_refresh = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         service._save_state()
 
         on_disk = json.loads(Path(service.config.state_file).read_text())
@@ -118,9 +119,7 @@ class TestStateTransitions:
             service._request_port_mapping()
         assert service.state == ServiceState.WAITING_VPN
 
-    def test_configure_qbittorrent_updates_on_mismatch(
-        self, service: QBouncerService
-    ) -> None:
+    def test_configure_qbittorrent_updates_on_mismatch(self, service: QBouncerService) -> None:
         service.state_data.current_port = 5555
         service.qbt_client.get_listening_port = MagicMock(return_value=0)
         service.qbt_client.get_network_interface = MagicMock(return_value="")
@@ -131,13 +130,9 @@ class TestStateTransitions:
         )
         assert service.state == ServiceState.MONITORING
 
-    def test_configure_qbittorrent_qbt_error_raises(
-        self, service: QBouncerService
-    ) -> None:
+    def test_configure_qbittorrent_qbt_error_raises(self, service: QBouncerService) -> None:
         service.state_data.current_port = 5555
-        service.qbt_client.get_listening_port = MagicMock(
-            side_effect=QBittorrentError("boom")
-        )
+        service.qbt_client.get_listening_port = MagicMock(side_effect=QBittorrentError("boom"))
         with pytest.raises(QBittorrentError):
             service._configure_qbittorrent()
 
@@ -147,9 +142,7 @@ class TestFailureHandling:
         service._handle_failure()
         assert service.state_data.consecutive_failures == 1
 
-    def test_resets_to_waiting_vpn_at_threshold(
-        self, service: QBouncerService
-    ) -> None:
+    def test_resets_to_waiting_vpn_at_threshold(self, service: QBouncerService) -> None:
         service.state_data.consecutive_failures = service.config.max_consecutive_failures - 1
         with patch.object(service, "_sleep"):
             service._handle_failure()
@@ -161,6 +154,7 @@ class TestShutdownSignal:
     def test_signal_sets_event_and_state(self, service: QBouncerService) -> None:
         assert not service._shutdown_event.is_set()
         import signal as signal_mod
+
         service._handle_signal(signal_mod.SIGTERM, None)
         assert service._shutdown_event.is_set()
         assert service.state == ServiceState.SHUTTING_DOWN
@@ -169,6 +163,7 @@ class TestShutdownSignal:
         self, service: QBouncerService
     ) -> None:
         import time
+
         service._shutdown_event.set()
         start = time.monotonic()
         service._sleep(60)
@@ -176,16 +171,16 @@ class TestShutdownSignal:
 
 
 class TestMonitorTransitions:
-    def test_vpn_due_returns_waiting_vpn_when_unhealthy(
-        self, service: QBouncerService
-    ) -> None:
+    def test_vpn_due_returns_waiting_vpn_when_unhealthy(self, service: QBouncerService) -> None:
         from datetime import datetime, timezone
+
         service.wg_monitor.is_healthy = MagicMock(return_value=False)
         result = service._vpn_due_transition(datetime.now(timezone.utc))
         assert result == ServiceState.WAITING_VPN
 
     def test_port_refresh_due_triggers_mapping(self, service: QBouncerService) -> None:
         from datetime import datetime, timezone
+
         # Never refreshed -> due
         result = service._port_refresh_due_transition(datetime.now(timezone.utc))
         assert result == ServiceState.MAPPING_PORT

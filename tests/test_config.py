@@ -98,14 +98,12 @@ class TestTLSPosture:
 
 
 class TestEnvPrecedence:
-    def test_env_overrides_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_overrides_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         cfg = tmp_path / "q.toml"
         cfg.write_text(
             '[wireguard]\ninterface = "wg1"\n'
             '[natpmp]\ngateway = "10.0.0.1"\n'
-            '[qbittorrent]\nport = 8080\n'
+            "[qbittorrent]\nport = 8080\n"
         )
         monkeypatch.setenv("QBOUNCER_WG_INTERFACE", "wg9")
         monkeypatch.setenv("QBOUNCER_QBT_PORT", "9090")
@@ -118,7 +116,7 @@ class TestEnvPrecedence:
         cfg = tmp_path / "q.toml"
         cfg.write_text(
             '[wireguard]\ninterface = "wg3"\n'
-            '[qbittorrent]\nport = 9999\n'
+            "[qbittorrent]\nport = 9999\n"
             '[natpmp]\ngateway = "10.2.0.1"\n'
         )
         c = Config.load(cfg)

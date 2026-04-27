@@ -8,12 +8,12 @@ import os
 import signal
 import socket
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from types import FrameType
-from typing import Callable
 
 from .config import Config
 from .exceptions import KillswitchError, NatPmpError, QBittorrentError, QBouncerError
@@ -266,8 +266,11 @@ class QBouncerService:
             logger.info("Port mapping obtained: %d", new_port)
             self.state = ServiceState.CONFIGURING
         else:
-            self.state = ServiceState.MONITORING if self._qbt_port_matches(new_port) \
+            self.state = (
+                ServiceState.MONITORING
+                if self._qbt_port_matches(new_port)
                 else ServiceState.CONFIGURING
+            )
 
         self._save_state()
 
@@ -279,9 +282,7 @@ class QBouncerService:
             logger.warning("Failed to verify qBittorrent port: %s", e)
             return False
         if actual != expected:
-            logger.warning(
-                "qBittorrent port drifted: expected %d, got %d", expected, actual
-            )
+            logger.warning("qBittorrent port drifted: expected %d, got %d", expected, actual)
             return False
         logger.debug("Port unchanged: %d", expected)
         return True
@@ -344,10 +345,7 @@ class QBouncerService:
     def _port_refresh_due_transition(self, now: datetime) -> ServiceState | None:
         """Trigger a port refresh if the refresh interval has elapsed."""
         last = self.state_data.last_port_refresh
-        due = (
-            last is None
-            or (now - last).total_seconds() >= self.config.natpmp_refresh_interval
-        )
+        due = last is None or (now - last).total_seconds() >= self.config.natpmp_refresh_interval
         return ServiceState.MAPPING_PORT if due else None
 
     def _qbt_verify_transition(self) -> ServiceState | None:
@@ -380,20 +378,17 @@ class QBouncerService:
     def _monitor(self) -> None:
         """Steady-state: run periodic checks, transition when something changes."""
         now = datetime.now(timezone.utc)
-        for step in (
-            lambda: self._vpn_due_transition(now),
-            lambda: self._port_refresh_due_transition(now),
-            self._qbt_verify_transition,
+        for transition in (
+            self._vpn_due_transition(now),
+            self._port_refresh_due_transition(now),
+            self._qbt_verify_transition(),
         ):
-            transition = step()
             if transition is not None:
                 self.state = transition
                 return
 
         self._verify_killswitch()
-        self._sleep(
-            min(self.config.wg_health_check_interval, self.config.natpmp_refresh_interval)
-        )
+        self._sleep(min(self.config.wg_health_check_interval, self.config.natpmp_refresh_interval))
 
     # -- failure handling -----------------------------------------------------
 

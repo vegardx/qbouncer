@@ -47,9 +47,7 @@ class WireGuardMonitor:
             logger.warning("Timeout executing: %s", " ".join(argv))
             return None
         except FileNotFoundError as e:
-            raise WireGuardError(
-                missing_command_msg or f"{argv[0]!r} command not found"
-            ) from e
+            raise WireGuardError(missing_command_msg or f"{argv[0]!r} command not found") from e
 
     def is_interface_up(self) -> bool:
         """Check if the WireGuard interface exists and is UP.
