@@ -93,6 +93,11 @@ if id "$SERVICE_USER" &>/dev/null; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         info "Removing service user..."
         userdel "$SERVICE_USER"
+        # useradd -U creates a matching group; remove it if still present and empty
+        if getent group "$SERVICE_USER" &>/dev/null; then
+            groupdel "$SERVICE_USER" 2>/dev/null || \
+                warn "Group ${SERVICE_USER} could not be removed (may have other members)"
+        fi
     else
         warn "Service user ${SERVICE_USER} preserved"
     fi

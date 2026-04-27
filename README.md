@@ -6,17 +6,18 @@ Designed for use with ProtonVPN's port forwarding feature, but should work with 
 
 ## Features
 
-- Monitors WireGuard interface health (connectivity, handshake freshness)
+- Monitors WireGuard interface health (interface state, IP assignment, gateway reachability)
 - Requests NAT-PMP port mappings via `natpmpc`
 - Automatically updates qBittorrent's listening port when the mapped port changes
 - Ensures qBittorrent is bound to the VPN interface
+- Optional iptables/ip6tables killswitch (both IPv4 and IPv6) to prevent leaks
 - State machine with automatic recovery from failures
 - systemd integration with watchdog support
 - State persistence across restarts
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - `natpmpc` (from libnatpmp)
 - `wireguard-tools` (for `wg` command)
 - A running WireGuard VPN with NAT-PMP support
@@ -32,20 +33,32 @@ The installer will guide you through the setup interactively:
 curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
 ```
 
-Or with options for non-interactive install:
+> **Supply chain note:** `curl | bash` trusts whatever `raw.githubusercontent.com`
+> serves at request time. For stronger guarantees, download first and verify the
+> published checksum before executing:
+>
+> ```bash
+> curl -fsSLo install.sh https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh
+> # Check against the checksum published on the release page before running:
+> sha256sum install.sh
+> sudo bash install.sh
+> ```
+
+Or with options for non-interactive install. Pass credentials via environment
+variables, not CLI flags, so they don't show up in `ps`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash -s -- \
-  --non-interactive \
-  --force-config \
-  --wg-interface wg0 \
-  --gateway 10.2.0.1 \
-  --qbt-host localhost \
-  --qbt-port 8080 \
-  --qbt-username "" \
-  --qbt-password "" \
-  --killswitch \
-  --killswitch-user qbittorrent
+QBT_PASSWORD="..." curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | \
+  sudo -E bash -s -- \
+    --non-interactive \
+    --force-config \
+    --wg-interface wg0 \
+    --gateway 10.2.0.1 \
+    --qbt-host localhost \
+    --qbt-port 8080 \
+    --qbt-username admin \
+    --killswitch \
+    --killswitch-user qbittorrent
 ```
 
 The installer is idempotent and can be run multiple times safely to upgrade or reconfigure.

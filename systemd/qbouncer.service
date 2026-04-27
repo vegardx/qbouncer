@@ -16,6 +16,7 @@ RestartSec=10
 # Security hardening
 User=qbouncer
 Group=qbouncer
+UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -24,9 +25,18 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount
+SystemCallErrorNumber=EPERM
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
 
@@ -40,6 +50,7 @@ CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 RuntimeDirectory=qbouncer
 StateDirectory=qbouncer
 ConfigurationDirectory=qbouncer
+ReadWritePaths=/var/lib/qbouncer
 
 # Allow reading wireguard config (for wg show)
 ReadOnlyPaths=/etc/wireguard

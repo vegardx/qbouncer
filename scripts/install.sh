@@ -8,8 +8,12 @@
 # Or with options:
 #   curl -fsSL ... | bash -s -- --wg-interface wg0 --gateway 10.2.0.1
 #
+# For credentials, prefer env vars so they don't show up in `ps`:
+#   QBT_PASSWORD="secret" bash install.sh --non-interactive ...
+#
 
 set -euo pipefail
+umask 077
 
 # Defaults
 INSTALL_DIR="/opt/qbouncer"
@@ -24,7 +28,7 @@ WG_GATEWAY=""
 QBT_HOST="localhost"
 QBT_PORT=""
 QBT_USERNAME=""
-QBT_PASSWORD=""
+QBT_PASSWORD="${QBT_PASSWORD:-}"
 KILLSWITCH_ENABLED=false
 KILLSWITCH_USER=""
 
@@ -47,19 +51,18 @@ prompt() {
     local default="$3"
     local current_value="${!var_name:-}"
 
-    # If already set via CLI, skip prompt
     if [[ -n "$current_value" ]]; then
-        echo -e "${BOLD}$prompt_text${NC} [$current_value] (from CLI)"
+        echo -e "${BOLD}$prompt_text${NC} [$current_value] (from CLI/env)"
         return
     fi
 
+    local value
     if [[ -n "$default" ]]; then
         read -rp "$(echo -e "${BOLD}$prompt_text${NC} [$default]: ")" value
-        eval "$var_name=\"${value:-$default}\""
     else
         read -rp "$(echo -e "${BOLD}$prompt_text${NC}: ")" value
-        eval "$var_name=\"$value\""
     fi
+    printf -v "$var_name" '%s' "${value:-$default}"
 }
 
 prompt_password() {
@@ -68,13 +71,14 @@ prompt_password() {
     local current_value="${!var_name:-}"
 
     if [[ -n "$current_value" ]]; then
-        echo -e "${BOLD}$prompt_text${NC}: *** (from CLI)"
+        echo -e "${BOLD}$prompt_text${NC}: *** (from env)"
         return
     fi
 
+    local value
     read -rsp "$(echo -e "${BOLD}$prompt_text${NC} (leave empty if none): ")" value
     echo
-    eval "$var_name=\"$value\""
+    printf -v "$var_name" '%s' "$value"
 }
 
 usage() {
@@ -87,26 +91,28 @@ Options:
     --qbt-host HOST         qBittorrent host (default: localhost)
     --qbt-port PORT         qBittorrent Web UI port
     --qbt-username USER     qBittorrent username
-    --qbt-password PASS     qBittorrent password
     --killswitch            Enable iptables killswitch
     --killswitch-user USER  User running qBittorrent (for killswitch)
-    --release TAG           Install specific release tag (default: latest from main)
+    --release TAG           Install a specific release tag (vX.Y.Z) or branch name
     --non-interactive       Skip prompts, use defaults/CLI args only
     --force-config          Overwrite existing configuration file
     -h, --help              Show this help message
+
+Credentials:
+    Set QBT_PASSWORD in the environment to provide a password without an
+    interactive prompt. Passing passwords on the command line is not supported
+    because it would leak them to \`ps\`.
 
 Examples:
     # Interactive install
     $0
 
     # Non-interactive with all options
-    $0 --non-interactive --wg-interface wg0 --gateway 10.2.0.1 --qbt-port 8080
+    QBT_PASSWORD="..." $0 --non-interactive --wg-interface wg0 \\
+        --gateway 10.2.0.1 --qbt-port 8080
 
-    # Pipe from curl
+    # Pipe from curl (consider verifying checksum first, see README)
     curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
-
-    # Reinstall with new config
-    $0 --non-interactive --force-config --wg-interface wg0 --qbt-port 80
 EOF
     exit 0
 }
@@ -121,7 +127,6 @@ while [[ $# -gt 0 ]]; do
         --qbt-host) QBT_HOST="$2"; shift 2 ;;
         --qbt-port) QBT_PORT="$2"; shift 2 ;;
         --qbt-username) QBT_USERNAME="$2"; shift 2 ;;
-        --qbt-password) QBT_PASSWORD="$2"; shift 2 ;;
         --killswitch) KILLSWITCH_ENABLED=true; shift ;;
         --killswitch-user) KILLSWITCH_USER="$2"; shift 2 ;;
         --release) RELEASE="$2"; shift 2 ;;
@@ -131,6 +136,14 @@ while [[ $# -gt 0 ]]; do
         *) error "Unknown option: $1" ;;
     esac
 done
+
+# Validate --release format to prevent argument injection into `git clone`.
+# Accept semver tags (with optional leading v), branch names, and full SHAs.
+if [[ -n "$RELEASE" ]]; then
+    if ! [[ "$RELEASE" =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*|[A-Za-z0-9][A-Za-z0-9._/-]*)$ ]]; then
+        error "Invalid --release value: $RELEASE"
+    fi
+fi
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
@@ -256,7 +269,7 @@ step "Setting up service user"
 if id "$SERVICE_USER" &>/dev/null; then
     info "Service user '$SERVICE_USER' already exists"
 else
-    useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
+    useradd -r -U -s /usr/sbin/nologin "$SERVICE_USER"
     info "Created service user '$SERVICE_USER'"
 fi
 
@@ -265,7 +278,6 @@ step "Installing qbouncer"
 
 mkdir -p "$INSTALL_DIR"
 
-# Create or update virtual environment
 if [[ -d "$INSTALL_DIR/venv" ]]; then
     info "Virtual environment exists, upgrading..."
 else
@@ -273,24 +285,20 @@ else
     python3 -m venv "$INSTALL_DIR/venv"
 fi
 
-# Upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
 
-# Clone or update repository
+# Clone repository into a temp dir protected by the process umask (077 above)
 TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TEMP_DIR"' EXIT
+trap 'rm -rf "$TEMP_DIR"' EXIT INT TERM HUP
 
-# Determine which branch/tag to clone
 GIT_REF="${RELEASE:-main}"
 info "Downloading qbouncer ($GIT_REF)..."
-git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer" 2>/dev/null
+git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer"
 
-# Install package (uninstall first to ensure clean install)
 "$INSTALL_DIR/venv/bin/pip" uninstall -y qbouncer 2>/dev/null || true
 info "Installing package..."
 "$INSTALL_DIR/venv/bin/pip" install --no-cache-dir "$TEMP_DIR/qbouncer" -q
 
-# Verify installation
 VERSION=$("$INSTALL_DIR/venv/bin/qbouncer" --version 2>/dev/null || echo "unknown")
 info "Installed qbouncer $VERSION"
 
@@ -322,111 +330,77 @@ else
     WRITE_CONFIG=true
 fi
 
+# Produce a TOML string-safe value: backslash-escape backslashes and
+# double-quotes; reject control characters outright.
+toml_escape() {
+    python3 -c '
+import sys
+s = sys.argv[1]
+if any(ord(c) < 0x20 for c in s):
+    sys.exit("Control characters not permitted in config values")
+sys.stdout.write(s.replace("\\\\", "\\\\\\\\").replace("\"", "\\\\\""))
+' "$1"
+}
+
 if [[ "$WRITE_CONFIG" == "true" ]]; then
-    cat > "$CONFIG_FILE" << EOF
-# qbouncer configuration
-# Generated by install.sh on $(date -Iseconds)
+    # install(1) creates the file with restrictive perms from first open,
+    # closing the umask race between create+chmod.
+    install -o root -g "$SERVICE_USER" -m 0640 /dev/null "$CONFIG_FILE"
 
-[wireguard]
-interface = "$WG_INTERFACE"
-health_check_host = "$WG_GATEWAY"
-health_check_interval = 30
-
-[natpmp]
-gateway = "$WG_GATEWAY"
-refresh_interval = 60
-lease_lifetime = 120
-
-[qbittorrent]
-host = "$QBT_HOST"
-port = $QBT_PORT
-EOF
-
-    if [[ -n "$QBT_USERNAME" ]]; then
-        echo "username = \"$QBT_USERNAME\"" >> "$CONFIG_FILE"
-    fi
-    if [[ -n "$QBT_PASSWORD" ]]; then
-        echo "password = \"$QBT_PASSWORD\"" >> "$CONFIG_FILE"
-    fi
-
-    cat >> "$CONFIG_FILE" << EOF
-interface_binding = "$WG_INTERFACE"
-
-[service]
-log_level = "INFO"
-state_file = "/var/lib/qbouncer/state.json"
-max_consecutive_failures = 5
-failure_backoff_base = 5
-failure_backoff_max = 300
-
-[killswitch]
-enabled = $KILLSWITCH_ENABLED
-EOF
-
-    if [[ -n "$KILLSWITCH_USER" ]]; then
-        echo "user = \"$KILLSWITCH_USER\"" >> "$CONFIG_FILE"
-    fi
+    {
+        echo "# qbouncer configuration"
+        echo "# Generated by install.sh on $(date -Iseconds)"
+        echo
+        echo "[wireguard]"
+        echo "interface = \"$(toml_escape "$WG_INTERFACE")\""
+        echo "health_check_host = \"$(toml_escape "$WG_GATEWAY")\""
+        echo "health_check_interval = 30"
+        echo
+        echo "[natpmp]"
+        echo "gateway = \"$(toml_escape "$WG_GATEWAY")\""
+        echo "refresh_interval = 60"
+        echo "lease_lifetime = 120"
+        echo
+        echo "[qbittorrent]"
+        echo "host = \"$(toml_escape "$QBT_HOST")\""
+        echo "port = $QBT_PORT"
+        if [[ -n "$QBT_USERNAME" ]]; then
+            echo "username = \"$(toml_escape "$QBT_USERNAME")\""
+        fi
+        if [[ -n "$QBT_PASSWORD" ]]; then
+            echo "password = \"$(toml_escape "$QBT_PASSWORD")\""
+        fi
+        echo "interface_binding = \"$(toml_escape "$WG_INTERFACE")\""
+        echo
+        echo "[service]"
+        echo "log_level = \"INFO\""
+        echo "state_file = \"/var/lib/qbouncer/state.json\""
+        echo
+        echo "[killswitch]"
+        echo "enabled = $KILLSWITCH_ENABLED"
+        if [[ -n "$KILLSWITCH_USER" ]]; then
+            echo "user = \"$(toml_escape "$KILLSWITCH_USER")\""
+        fi
+    } >> "$CONFIG_FILE"
 
     info "Configuration written to $CONFIG_FILE"
 fi
 
-# Always fix ownership and permissions (idempotent)
+# Idempotent perms (also applied when config is preserved)
 chown root:"$SERVICE_USER" "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
 chown root:"$SERVICE_USER" "$CONFIG_FILE"
 chmod 640 "$CONFIG_FILE"
 
+# Release password reference from the shell
+QBT_PASSWORD=""
+unset QBT_PASSWORD
+
 # Step 6: Install systemd service (idempotent)
 step "Installing systemd service"
 
-cat > /etc/systemd/system/qbouncer.service << 'EOF'
-[Unit]
-Description=qbouncer - WireGuard NAT-PMP Port Bouncer for qBittorrent
-Documentation=https://github.com/vegardx/qbouncer
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=notify
-ExecStart=/opt/qbouncer/venv/bin/qbouncer --config /etc/qbouncer/qbouncer.toml
-Restart=on-failure
-RestartSec=10
-WatchdogSec=90
-
-User=qbouncer
-Group=qbouncer
-
-RuntimeDirectory=qbouncer
-StateDirectory=qbouncer
-ConfigurationDirectory=qbouncer
-
-# Security hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-MemoryDenyWriteExecute=yes
-LockPersonality=yes
-
-ReadOnlyPaths=/etc/wireguard
-ReadWritePaths=/var/lib/qbouncer
-
-# CAP_NET_RAW: ping for health checks
-# CAP_NET_ADMIN: iptables for killswitch (optional feature)
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+install -m 0644 "$TEMP_DIR/qbouncer/systemd/qbouncer.service" \
+    /etc/systemd/system/qbouncer.service
 systemctl daemon-reload
 info "systemd service installed"
 
@@ -441,8 +415,15 @@ else
     systemctl start qbouncer
 fi
 
-# Wait a moment and check status
-sleep 2
+# Poll service status for up to 30 seconds (the service spends the first
+# seconds in WAITING_VPN before calling sd_notify READY=1)
+POLL_DEADLINE=$((SECONDS + 30))
+while (( SECONDS < POLL_DEADLINE )); do
+    if systemctl is-active --quiet qbouncer; then
+        break
+    fi
+    sleep 1
+done
 
 if systemctl is-active --quiet qbouncer; then
     info "Service is running"
@@ -459,7 +440,7 @@ echo
 echo "Useful commands:"
 echo "  systemctl status qbouncer     - Check service status"
 echo "  journalctl -u qbouncer -f     - Follow logs"
-echo "  nano $CONFIG_FILE  - Edit configuration"
+echo "  \$EDITOR $CONFIG_FILE  - Edit configuration"
 echo
 echo "Configuration: $CONFIG_FILE"
 echo "Logs: journalctl -u qbouncer"
