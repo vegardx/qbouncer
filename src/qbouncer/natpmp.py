@@ -108,7 +108,7 @@ class NatPmpManager:
             PortMapping with extracted details
 
         Raises:
-            NatPmpError: If output cannot be parsed
+            NatPmpError: If output cannot be parsed or contains invalid values
         """
         logger.debug("natpmpc output: %s", output)
 
@@ -120,6 +120,13 @@ class NatPmpManager:
         proto = match.group(2)
         private_port = int(match.group(3))
         lifetime = int(match.group(4))
+
+        if not 1 <= public_port <= 65535:
+            raise NatPmpError(f"Gateway returned invalid public port: {public_port}")
+        if not 0 <= private_port <= 65535:
+            raise NatPmpError(f"Gateway returned invalid private port: {private_port}")
+        if not 1 <= lifetime <= 86400:
+            raise NatPmpError(f"Gateway returned invalid lifetime: {lifetime}")
 
         mapping = PortMapping(
             public_port=public_port,

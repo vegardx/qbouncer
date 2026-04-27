@@ -211,6 +211,14 @@ class QBouncerService:
         logger.info("qBittorrent: %s:%d", self.config.qbt_host, self.config.qbt_port)
         if self.killswitch:
             logger.info("Killswitch: enabled for user %s", self.config.killswitch_user)
+            # Install killswitch before the VPN is confirmed up so the user's
+            # traffic is fail-closed during the boot window (qBittorrent may
+            # already be running by the time we get here).
+            try:
+                self.killswitch.setup()
+            except KillswitchError as e:
+                logger.error("Failed to setup killswitch: %s", e)
+                raise
 
         # Transition to waiting for VPN
         self.state = ServiceState.WAITING_VPN
@@ -252,16 +260,6 @@ class QBouncerService:
 
         if self.wg_monitor.is_healthy():
             logger.info("WireGuard VPN is healthy")
-
-            # Setup killswitch now that VPN is up
-            if self.killswitch:
-                try:
-                    self.killswitch.setup()
-                except KillswitchError as e:
-                    logger.error("Failed to setup killswitch: %s", e)
-                    self._handle_failure()
-                    return
-
             self.state_data.consecutive_failures = 0
             self.state = ServiceState.WAITING_QBT
         else:
