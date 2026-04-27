@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import signal
 import socket
-import time
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from types import FrameType
+from typing import Callable
 
 from .config import Config
 from .exceptions import KillswitchError, NatPmpError, QBittorrentError, QBouncerError
@@ -24,8 +24,11 @@ from .wireguard import WireGuardMonitor
 
 logger = logging.getLogger(__name__)
 
-# Polling intervals (seconds)
-QBT_AVAILABILITY_POLL_INTERVAL = 5  # How often to check if qBittorrent is available
+# Polling and retry intervals (seconds). Not exposed as config: systemd's
+# Restart=on-failure is the durable recovery path; in-process backoff is
+# intentionally a small fixed value to bound shutdown latency.
+QBT_AVAILABILITY_POLL_INTERVAL = 5
+FAILURE_RETRY_DELAY = 30
 
 
 @dataclass
@@ -46,7 +49,6 @@ class ServiceState(Enum):
     MAPPING_PORT = auto()
     CONFIGURING = auto()
     MONITORING = auto()
-    RECOVERING = auto()
     SHUTTING_DOWN = auto()
 
 
@@ -61,9 +63,8 @@ class QBouncerService:
         """
         self.config = config
         self.state = ServiceState.WAITING_VPN
-        self._shutdown_requested = False
+        self._shutdown_event = threading.Event()
 
-        # Initialize components
         self.wg_monitor = WireGuardMonitor(
             interface=config.wg_interface,
             health_check_host=config.wg_health_check_host,
@@ -82,10 +83,8 @@ class QBouncerService:
             ca_bundle=config.qbt_ca_bundle,
         )
 
-        # State tracking
         self.state_data = ServiceStateData()
 
-        # Initialize killswitch if enabled
         self.killswitch: KillswitchManager | None = None
         if config.killswitch_enabled:
             self.killswitch = KillswitchManager(
@@ -93,46 +92,42 @@ class QBouncerService:
                 user=config.killswitch_user,
             )
 
-        # Load persisted state
         self._load_state()
 
+    # -- signals and sleep ----------------------------------------------------
+
     def _setup_signal_handlers(self) -> None:
-        """Setup signal handlers for graceful shutdown."""
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
 
-    def _handle_signal(self, signum: int, frame: Any) -> None:
-        """Handle shutdown signals."""
+    def _handle_signal(self, signum: int, frame: FrameType | None) -> None:
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, initiating shutdown", sig_name)
-        self._shutdown_requested = True
+        self._shutdown_event.set()
         self.state = ServiceState.SHUTTING_DOWN
 
-    def _sd_notify(self, message: str) -> None:
-        """Send notification to systemd.
+    def _sleep(self, seconds: float) -> None:
+        """Sleep but return immediately when a shutdown signal arrives."""
+        self._shutdown_event.wait(timeout=seconds)
 
-        Args:
-            message: Notification message (e.g., READY=1, WATCHDOG=1)
-        """
+    # -- systemd notify -------------------------------------------------------
+
+    def _sd_notify(self, message: str) -> None:
         notify_socket = os.environ.get("NOTIFY_SOCKET")
         if not notify_socket:
             return
-
         try:
             if notify_socket.startswith("@"):
                 notify_socket = "\0" + notify_socket[1:]
-
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-            try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
                 sock.connect(notify_socket)
                 sock.sendall(message.encode())
-            finally:
-                sock.close()
         except OSError as e:
             logger.debug("Failed to notify systemd: %s", e)
 
+    # -- state persistence ----------------------------------------------------
+
     def _load_state(self) -> None:
-        """Load persisted state from state file."""
         state_path = Path(self.config.state_file)
         if not state_path.exists():
             logger.debug("No state file found, starting fresh")
@@ -158,7 +153,6 @@ class QBouncerService:
             logger.warning("Failed to load state file (ignoring): %s", e)
 
     def _save_state(self) -> None:
-        """Persist current state to state file atomically."""
         state_path = Path(self.config.state_file)
         state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -186,18 +180,7 @@ class QBouncerService:
             except OSError:
                 pass
 
-    def _calculate_backoff(self) -> int:
-        """Calculate backoff delay based on consecutive failures.
-
-        Returns:
-            Delay in seconds
-        """
-        base = self.config.failure_backoff_base
-        max_delay = self.config.failure_backoff_max
-
-        delay = min(base * (2**self.state_data.consecutive_failures), max_delay)
-        jitter = random.uniform(0, delay * 0.1)
-        return int(delay + jitter)
+    # -- main loop ------------------------------------------------------------
 
     def run(self) -> None:
         """Main service loop."""
@@ -209,24 +192,31 @@ class QBouncerService:
         logger.info("qBittorrent: %s:%d", self.config.qbt_host, self.config.qbt_port)
         if self.killswitch:
             logger.info("Killswitch: enabled for user %s", self.config.killswitch_user)
-            # Install killswitch before the VPN is confirmed up so the user's
-            # traffic is fail-closed during the boot window (qBittorrent may
-            # already be running by the time we get here).
+            # Install the killswitch before the VPN is confirmed up so the
+            # user's traffic fails closed during startup.
             try:
                 self.killswitch.setup()
             except KillswitchError as e:
                 logger.error("Failed to setup killswitch: %s", e)
                 raise
 
-        # Transition to waiting for VPN
         self.state = ServiceState.WAITING_VPN
-
-        # Notify systemd we're ready
         self._sd_notify("READY=1")
 
-        while self.state != ServiceState.SHUTTING_DOWN:
+        dispatch: dict[ServiceState, Callable[[], None]] = {
+            ServiceState.WAITING_VPN: self._wait_for_vpn,
+            ServiceState.WAITING_QBT: self._wait_for_qbittorrent,
+            ServiceState.MAPPING_PORT: self._request_port_mapping,
+            ServiceState.CONFIGURING: self._configure_qbittorrent,
+            ServiceState.MONITORING: self._monitor,
+        }
+
+        while not self._shutdown_event.is_set():
             try:
-                self._tick()
+                handler = dispatch.get(self.state)
+                if handler is None:
+                    break
+                handler()
                 self._sd_notify("WATCHDOG=1")
             except QBouncerError as e:
                 logger.error("Service error: %s", e)
@@ -237,99 +227,76 @@ class QBouncerService:
 
         self._cleanup()
 
-    def _tick(self) -> None:
-        """Single iteration of the main loop."""
-        if self.state == ServiceState.WAITING_VPN:
-            self._wait_for_vpn()
-        elif self.state == ServiceState.WAITING_QBT:
-            self._wait_for_qbittorrent()
-        elif self.state == ServiceState.MAPPING_PORT:
-            self._request_port_mapping()
-        elif self.state == ServiceState.CONFIGURING:
-            self._configure_qbittorrent()
-        elif self.state == ServiceState.MONITORING:
-            self._monitor()
-        elif self.state == ServiceState.RECOVERING:
-            self._recover()
+    # -- state handlers -------------------------------------------------------
 
     def _wait_for_vpn(self) -> None:
-        """Wait for WireGuard VPN to become healthy."""
         logger.info("Waiting for WireGuard interface %s", self.config.wg_interface)
-
         if self.wg_monitor.is_healthy():
             logger.info("WireGuard VPN is healthy")
             self.state_data.consecutive_failures = 0
             self.state = ServiceState.WAITING_QBT
         else:
-            time.sleep(self.config.wg_health_check_interval)
+            self._sleep(self.config.wg_health_check_interval)
 
     def _wait_for_qbittorrent(self) -> None:
-        """Wait for qBittorrent API to become available."""
         logger.info("Waiting for qBittorrent at %s:%d", self.config.qbt_host, self.config.qbt_port)
-
         if self.qbt_client.is_reachable():
             version = self.qbt_client.get_version()
             logger.info("qBittorrent is available (version: %s)", version)
             self.state_data.consecutive_failures = 0
             self.state = ServiceState.MAPPING_PORT
         else:
-            time.sleep(QBT_AVAILABILITY_POLL_INTERVAL)
+            self._sleep(QBT_AVAILABILITY_POLL_INTERVAL)
 
     def _request_port_mapping(self) -> None:
-        """Request NAT-PMP port mapping."""
         logger.debug("Requesting NAT-PMP port mapping")
-
         try:
             old_port = self.state_data.current_port
             new_port = self.natpmp_manager.refresh_mapping()
-
-            self.state_data.current_port = new_port
-            self.state_data.last_port_refresh = datetime.now(timezone.utc)
-            self.state_data.consecutive_failures = 0
-
-            if old_port != new_port:
-                logger.info("Port mapping obtained: %d", new_port)
-                self.state = ServiceState.CONFIGURING
-            else:
-                # Port unchanged from NAT-PMP, but verify qBittorrent matches (catch drift)
-                try:
-                    qbt_port = self.qbt_client.get_listening_port()
-                    if qbt_port != new_port:
-                        logger.warning(
-                            "qBittorrent port drifted: expected %d, got %d",
-                            new_port,
-                            qbt_port,
-                        )
-                        self.state = ServiceState.CONFIGURING
-                    else:
-                        logger.debug("Port unchanged: %d", new_port)
-                        self.state = ServiceState.MONITORING
-                except QBittorrentError as e:
-                    logger.warning("Failed to verify qBittorrent port: %s", e)
-                    self.state = ServiceState.CONFIGURING
-
-            self._save_state()
-
         except NatPmpError as e:
             logger.error("NAT-PMP error: %s", e)
-            # NAT-PMP failure might indicate VPN issues
-            self._handle_failure()
             self.state = ServiceState.WAITING_VPN
+            raise
+
+        self.state_data.current_port = new_port
+        self.state_data.last_port_refresh = datetime.now(timezone.utc)
+        self.state_data.consecutive_failures = 0
+
+        if old_port != new_port:
+            logger.info("Port mapping obtained: %d", new_port)
+            self.state = ServiceState.CONFIGURING
+        else:
+            self.state = ServiceState.MONITORING if self._qbt_port_matches(new_port) \
+                else ServiceState.CONFIGURING
+
+        self._save_state()
+
+    def _qbt_port_matches(self, expected: int) -> bool:
+        """Return True iff qBittorrent's current listen port equals expected."""
+        try:
+            actual = self.qbt_client.get_listening_port()
+        except QBittorrentError as e:
+            logger.warning("Failed to verify qBittorrent port: %s", e)
+            return False
+        if actual != expected:
+            logger.warning(
+                "qBittorrent port drifted: expected %d, got %d", expected, actual
+            )
+            return False
+        logger.debug("Port unchanged: %d", expected)
+        return True
 
     def _configure_qbittorrent(self) -> None:
-        """Configure qBittorrent with current port and interface."""
         if self.state_data.current_port is None:
             logger.error("No port available for configuration")
             self.state = ServiceState.MAPPING_PORT
             return
 
         try:
-            # Get current qBittorrent settings
             current_port = self.qbt_client.get_listening_port()
             current_interface = self.qbt_client.get_network_interface()
 
             needs_update = False
-
             if current_port != self.state_data.current_port:
                 logger.info(
                     "qBittorrent port needs update: %d -> %d",
@@ -358,105 +325,111 @@ class QBouncerService:
 
         except QBittorrentError as e:
             logger.error("qBittorrent configuration error: %s", e)
-            self._handle_failure()
+            raise
 
-    def _monitor(self) -> None:
-        """Normal monitoring state - check VPN and refresh port periodically."""
-        now = datetime.now(timezone.utc)
+    # -- monitoring transitions ----------------------------------------------
 
-        # Check if VPN health check is due
-        if (
-            self.state_data.last_vpn_check is None
-            or (now - self.state_data.last_vpn_check).total_seconds()
-            >= self.config.wg_health_check_interval
-        ):
-            if not self.wg_monitor.is_healthy():
-                logger.warning("VPN health check failed")
-                self.state = ServiceState.WAITING_VPN
-                return
-            self.state_data.last_vpn_check = now
+    def _vpn_due_transition(self, now: datetime) -> ServiceState | None:
+        """Run the periodic VPN health check; return a new state if it failed."""
+        last = self.state_data.last_vpn_check
+        due = last is None or (now - last).total_seconds() >= self.config.wg_health_check_interval
+        if not due:
+            return None
+        if not self.wg_monitor.is_healthy():
+            logger.warning("VPN health check failed")
+            return ServiceState.WAITING_VPN
+        self.state_data.last_vpn_check = now
+        return None
 
-        # Check if port refresh is due
-        if (
-            self.state_data.last_port_refresh is None
-            or (now - self.state_data.last_port_refresh).total_seconds()
-            >= self.config.natpmp_refresh_interval
-        ):
-            self.state = ServiceState.MAPPING_PORT
-            return
+    def _port_refresh_due_transition(self, now: datetime) -> ServiceState | None:
+        """Trigger a port refresh if the refresh interval has elapsed."""
+        last = self.state_data.last_port_refresh
+        due = (
+            last is None
+            or (now - last).total_seconds() >= self.config.natpmp_refresh_interval
+        )
+        return ServiceState.MAPPING_PORT if due else None
 
-        # Verify qBittorrent is still reachable and configured correctly
+    def _qbt_verify_transition(self) -> ServiceState | None:
+        """Verify qBittorrent is still reachable and correctly bound."""
         try:
             if not self.qbt_client.is_reachable():
                 logger.warning("qBittorrent is no longer reachable")
-                self.state = ServiceState.WAITING_QBT
-                return
+                return ServiceState.WAITING_QBT
             if not self.qbt_client.verify_interface_binding(self.config.qbt_interface_binding):
                 logger.warning("qBittorrent interface binding changed, reconfiguring")
-                self.state = ServiceState.CONFIGURING
-                return
+                return ServiceState.CONFIGURING
         except QBittorrentError as e:
             logger.warning("Failed to verify qBittorrent: %s", e)
-            self.state = ServiceState.WAITING_QBT
+            return ServiceState.WAITING_QBT
+        return None
+
+    def _verify_killswitch(self) -> None:
+        """Re-establish killswitch rules if external changes removed them."""
+        if not self.killswitch:
             return
+        if self.killswitch.verify():
+            return
+        logger.warning("Killswitch rules missing, re-establishing")
+        try:
+            self.killswitch.setup()
+        except KillswitchError as e:
+            logger.error("Failed to re-establish killswitch: %s", e)
+            raise
 
-        # Verify killswitch is still active
-        if self.killswitch and not self.killswitch.verify():
-            logger.warning("Killswitch rules missing, re-establishing")
-            try:
-                self.killswitch.setup()
-            except KillswitchError as e:
-                logger.error("Failed to re-establish killswitch: %s", e)
-                self._handle_failure()
+    def _monitor(self) -> None:
+        """Steady-state: run periodic checks, transition when something changes."""
+        now = datetime.now(timezone.utc)
+        for step in (
+            lambda: self._vpn_due_transition(now),
+            lambda: self._port_refresh_due_transition(now),
+            self._qbt_verify_transition,
+        ):
+            transition = step()
+            if transition is not None:
+                self.state = transition
+                return
 
-        # Sleep until next check
-        time.sleep(
-            min(
-                self.config.wg_health_check_interval,
-                self.config.natpmp_refresh_interval,
-            )
+        self._verify_killswitch()
+        self._sleep(
+            min(self.config.wg_health_check_interval, self.config.natpmp_refresh_interval)
         )
 
-    def _recover(self) -> None:
-        """Recovery state after multiple failures."""
-        logger.warning(
-            "In recovery mode, %d consecutive failures", self.state_data.consecutive_failures
-        )
-
-        backoff = self._calculate_backoff()
-        logger.info("Backing off for %d seconds", backoff)
-        time.sleep(backoff)
-
-        # Try to recover by checking VPN first
-        self.state = ServiceState.WAITING_VPN
+    # -- failure handling -----------------------------------------------------
 
     def _handle_failure(self) -> None:
-        """Handle a failure by incrementing counter and possibly entering recovery."""
+        """Record a failure; back off and reset state on repeated failures.
+
+        Recovery strategy is deliberately simple: sleep FAILURE_RETRY_DELAY
+        seconds and fall back to WAITING_VPN. Persistent failures let systemd's
+        Restart=on-failure take over — it's the durable recovery mechanism.
+        """
         self.state_data.consecutive_failures += 1
         logger.warning("Failure count: %d", self.state_data.consecutive_failures)
 
         if self.state_data.consecutive_failures >= self.config.max_consecutive_failures:
             logger.error(
-                "Max consecutive failures (%d) reached, entering recovery",
+                "Max consecutive failures (%d) reached, backing off %ds before retry",
                 self.config.max_consecutive_failures,
+                FAILURE_RETRY_DELAY,
             )
-            self.state = ServiceState.RECOVERING
+            self._sleep(FAILURE_RETRY_DELAY)
+            self.state_data.consecutive_failures = 0
+            self.state = ServiceState.WAITING_VPN
+
+    # -- shutdown -------------------------------------------------------------
 
     def _cleanup(self) -> None:
-        """Cleanup on shutdown."""
         logger.info("Shutting down qbouncer service")
+        # Save state before touching iptables so a failure there doesn't
+        # lose the authoritative port/refresh record.
+        self._save_state()
 
-        # Remove killswitch rules
         if self.killswitch:
             try:
                 self.killswitch.cleanup()
             except Exception as e:
                 logger.error("Failed to cleanup killswitch: %s", e)
 
-        # Save final state
-        self._save_state()
-
-        # Notify systemd we're stopping
         self._sd_notify("STOPPING=1")
-
         logger.info("Shutdown complete")

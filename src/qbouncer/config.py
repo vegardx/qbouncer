@@ -60,10 +60,9 @@ class Config:
     log_level: str = "INFO"
     state_file: str = "/var/lib/qbouncer/state.json"
 
-    # Failure handling
+    # Failure handling — systemd restarts the service on persistent failure,
+    # so keep recovery policy simple: count N failures, then back off briefly.
     max_consecutive_failures: int = 5
-    failure_backoff_base: int = 5
-    failure_backoff_max: int = 300
 
     # Killswitch settings
     killswitch_enabled: bool = False
@@ -110,10 +109,6 @@ class Config:
 
         if self.max_consecutive_failures < 1:
             raise ConfigError("max_consecutive_failures must be at least 1")
-        if self.failure_backoff_base < 1:
-            raise ConfigError("failure_backoff_base must be at least 1 second")
-        if self.failure_backoff_max < self.failure_backoff_base:
-            raise ConfigError("failure_backoff_max must be >= failure_backoff_base")
 
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
         if self.log_level.upper() not in valid_levels:
@@ -197,8 +192,6 @@ class Config:
             "log_level": ("service", "log_level", str),
             "state_file": ("service", "state_file", str),
             "max_consecutive_failures": ("service", "max_consecutive_failures", int),
-            "failure_backoff_base": ("service", "failure_backoff_base", int),
-            "failure_backoff_max": ("service", "failure_backoff_max", int),
             # Killswitch
             "killswitch_enabled": ("killswitch", "enabled", _parse_bool),
             "killswitch_user": ("killswitch", "user", str),

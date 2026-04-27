@@ -61,14 +61,9 @@ log_level = "INFO"
 # Path to state file for persistence across restarts
 state_file = "/var/lib/qbouncer/state.json"
 
-# Maximum consecutive failures before entering recovery mode
+# Maximum consecutive failures before backing off and resetting to
+# WAITING_VPN (systemd's Restart=on-failure handles persistent crashes).
 max_consecutive_failures = 5
-
-# Base delay for exponential backoff in seconds
-failure_backoff_base = 5
-
-# Maximum delay for exponential backoff in seconds
-failure_backoff_max = 300
 
 [killswitch]
 # Enable iptables killswitch to prevent traffic leaks outside VPN
