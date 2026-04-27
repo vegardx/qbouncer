@@ -27,7 +27,7 @@ lease_lifetime = 120
 host = "localhost"
 
 # qBittorrent Web UI port
-port = 80
+port = 8080
 
 # Use HTTPS instead of HTTP for Web UI connection
 use_https = false

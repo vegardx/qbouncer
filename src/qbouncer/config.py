@@ -38,7 +38,7 @@ class Config:
     """Configuration for qbouncer service."""
 
     # WireGuard settings
-    wg_interface: str = "wg2"
+    wg_interface: str = "wg0"
     wg_health_check_host: str = "10.2.0.1"
     wg_health_check_interval: int = 30
 
@@ -49,12 +49,13 @@ class Config:
 
     # qBittorrent settings
     qbt_host: str = "localhost"
-    qbt_port: int = 80
+    qbt_port: int = 8080
     qbt_use_https: bool = False
     qbt_verify_ssl: bool = True
+    qbt_ca_bundle: str = ""
     qbt_username: str = ""
     qbt_password: str = ""
-    qbt_interface_binding: str = "wg2"
+    qbt_interface_binding: str = "wg0"
 
     # Service settings
     log_level: str = "INFO"

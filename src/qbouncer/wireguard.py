@@ -34,12 +34,16 @@ class WireGuardMonitor:
     def is_interface_up(self) -> bool:
         """Check if the WireGuard interface exists and is UP.
 
+        Uses `ip -br link show` for structured, version-stable output. WireGuard
+        tunnels are point-to-point with no link layer, so their operational state
+        is typically UNKNOWN rather than UP even when usable; both are treated as up.
+
         Returns:
-            True if interface exists and has UP state
+            True if interface exists and is administratively up
         """
         try:
             result = subprocess.run(
-                ["ip", "link", "show", self.interface],
+                ["ip", "-br", "link", "show", self.interface],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -48,19 +52,23 @@ class WireGuardMonitor:
                 logger.debug("Interface %s not found", self.interface)
                 return False
 
-            # Check for "state UP" or "<...UP...>" in output
-            output = result.stdout
-            if "state UP" in output or ",UP," in output or "<UP," in output:
+            # Output format: "<iface> <state> <flags>"
+            parts = result.stdout.split()
+            if len(parts) < 3:
+                return False
+            state = parts[1]
+            flag_set = set(parts[2].strip("<>").split(","))
+            if state in {"UP", "UNKNOWN"} and "UP" in flag_set:
                 return True
 
-            logger.debug("Interface %s exists but is not UP", self.interface)
+            logger.debug("Interface %s exists but is not UP (state=%s)", self.interface, state)
             return False
 
         except subprocess.TimeoutExpired:
             logger.warning("Timeout checking interface %s", self.interface)
             return False
-        except FileNotFoundError:
-            raise WireGuardError("'ip' command not found")
+        except FileNotFoundError as e:
+            raise WireGuardError("'ip' command not found") from e
 
     def get_interface_ip(self) -> str | None:
         """Get the IPv4 address assigned to the WireGuard interface.

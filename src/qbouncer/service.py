@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from .config import Config
 from .exceptions import KillswitchError, NatPmpError, QBittorrentError, QBouncerError
@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["QBouncerService", "ServiceState"]
 
-# Type aliases
-PortNumber: TypeAlias = int
-
 # Polling intervals (seconds)
 QBT_AVAILABILITY_POLL_INTERVAL = 5  # How often to check if qBittorrent is available
 
@@ -37,7 +34,7 @@ QBT_AVAILABILITY_POLL_INTERVAL = 5  # How often to check if qBittorrent is avail
 class ServiceStateData:
     """Tracks runtime state of the service."""
 
-    current_port: PortNumber | None = None
+    current_port: int | None = None
     consecutive_failures: int = 0
     last_port_refresh: datetime | None = None
     last_vpn_check: datetime | None = None
@@ -148,20 +145,22 @@ class QBouncerService:
                 data = json.load(f)
 
             self.state_data.current_port = data.get("last_port")
+            self.state_data.consecutive_failures = int(data.get("consecutive_failures", 0))
             if data.get("last_refresh"):
                 self.state_data.last_port_refresh = datetime.fromisoformat(data["last_refresh"])
 
             logger.info(
-                "Loaded state: last_port=%s, last_refresh=%s",
+                "Loaded state: last_port=%s, last_refresh=%s, failures=%d",
                 self.state_data.current_port,
                 self.state_data.last_port_refresh,
+                self.state_data.consecutive_failures,
             )
 
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load state file: %s", e)
+        except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
+            logger.warning("Failed to load state file (ignoring): %s", e)
 
     def _save_state(self) -> None:
-        """Persist current state to state file."""
+        """Persist current state to state file atomically."""
         state_path = Path(self.config.state_file)
         state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -174,12 +173,20 @@ class QBouncerService:
             "consecutive_failures": self.state_data.consecutive_failures,
         }
 
+        tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
         try:
-            with open(state_path, "w") as f:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
-            os.chmod(state_path, 0o600)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, state_path)
         except OSError as e:
             logger.warning("Failed to save state file: %s", e)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _calculate_backoff(self) -> int:
         """Calculate backoff delay based on consecutive failures.
