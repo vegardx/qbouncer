@@ -24,8 +24,6 @@ from .wireguard import WireGuardMonitor
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["QBouncerService", "ServiceState"]
-
 # Polling intervals (seconds)
 QBT_AVAILABILITY_POLL_INTERVAL = 5  # How often to check if qBittorrent is available
 
@@ -43,7 +41,6 @@ class ServiceStateData:
 class ServiceState(Enum):
     """Service state machine states."""
 
-    INITIALIZING = auto()
     WAITING_VPN = auto()
     WAITING_QBT = auto()
     MAPPING_PORT = auto()
@@ -63,7 +60,7 @@ class QBouncerService:
             config: Service configuration
         """
         self.config = config
-        self.state = ServiceState.INITIALIZING
+        self.state = ServiceState.WAITING_VPN
         self._shutdown_requested = False
 
         # Initialize components
@@ -82,6 +79,7 @@ class QBouncerService:
             password=config.qbt_password,
             use_https=config.qbt_use_https,
             verify_ssl=config.qbt_verify_ssl,
+            ca_bundle=config.qbt_ca_bundle,
         )
 
         # State tracking

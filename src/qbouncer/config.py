@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-import pwd
 import re
 import sys
 from dataclasses import dataclass
+from ipaddress import AddressValueError, IPv4Address
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -17,11 +17,10 @@ else:
 
 from .exceptions import ConfigError
 
-__all__ = ["Config"]
-
-# Validation patterns
+# Linux IFNAMSIZ is 16 bytes including NUL → 15 usable chars.
 INTERFACE_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,14}$")
-IP_PATTERN = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _parse_bool(value: Any) -> bool:
@@ -74,31 +73,29 @@ class Config:
         """Validate configuration after initialization."""
         self._validate()
 
+    def _validate_iface(self, field: str, value: str) -> None:
+        if not INTERFACE_PATTERN.match(value):
+            raise ConfigError(
+                f"Invalid {field}: {value!r}. Must start with a letter, contain only "
+                "[a-zA-Z0-9_-], and be at most 15 characters."
+            )
+
+    def _validate_ipv4(self, field: str, value: str) -> None:
+        try:
+            IPv4Address(value)
+        except (AddressValueError, ValueError) as e:
+            raise ConfigError(f"Invalid {field}: {value!r}") from e
+
     def _validate(self) -> None:
-        """Validate configuration values."""
-        # Interface name validation
-        if not INTERFACE_PATTERN.match(self.wg_interface):
-            raise ConfigError(
-                f"Invalid WireGuard interface name: {self.wg_interface!r}. "
-                "Must start with a letter and contain only alphanumeric, hyphen, or underscore."
-            )
-        if not INTERFACE_PATTERN.match(self.qbt_interface_binding):
-            raise ConfigError(
-                f"Invalid qBittorrent interface binding: {self.qbt_interface_binding!r}. "
-                "Must start with a letter and contain only alphanumeric, hyphen, or underscore."
-            )
+        """Validate configuration values (pure, no I/O)."""
+        self._validate_iface("wg_interface", self.wg_interface)
+        self._validate_iface("qbt_interface_binding", self.qbt_interface_binding)
+        self._validate_ipv4("wg_health_check_host", self.wg_health_check_host)
+        self._validate_ipv4("natpmp_gateway", self.natpmp_gateway)
 
-        # IP address validation
-        if not IP_PATTERN.match(self.wg_health_check_host):
-            raise ConfigError(f"Invalid health check host IP: {self.wg_health_check_host!r}")
-        if not IP_PATTERN.match(self.natpmp_gateway):
-            raise ConfigError(f"Invalid NAT-PMP gateway IP: {self.natpmp_gateway!r}")
-
-        # Port validation
         if not 1 <= self.qbt_port <= 65535:
             raise ConfigError(f"Invalid qBittorrent port: {self.qbt_port}. Must be 1-65535.")
 
-        # Interval validation
         if self.wg_health_check_interval < 1:
             raise ConfigError("Health check interval must be at least 1 second")
         if self.natpmp_refresh_interval < 1:
@@ -111,7 +108,6 @@ class Config:
                 f"lease lifetime ({self.natpmp_lease_lifetime}s)"
             )
 
-        # Failure handling validation
         if self.max_consecutive_failures < 1:
             raise ConfigError("max_consecutive_failures must be at least 1")
         if self.failure_backoff_base < 1:
@@ -119,22 +115,25 @@ class Config:
         if self.failure_backoff_max < self.failure_backoff_base:
             raise ConfigError("failure_backoff_max must be >= failure_backoff_base")
 
-        # Log level validation
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
         if self.log_level.upper() not in valid_levels:
             raise ConfigError(
                 f"Invalid log level: {self.log_level!r}. Must be one of {valid_levels}"
             )
 
-        # Killswitch validation
-        if self.killswitch_enabled:
-            try:
-                pwd.getpwnam(self.killswitch_user)
-            except KeyError:
-                raise ConfigError(
-                    f"Killswitch user not found: {self.killswitch_user!r}. "
-                    "Ensure the user exists or disable killswitch."
-                )
+        # TLS posture: insist on verification (or a pinned CA bundle) for
+        # non-loopback HTTPS. Disabling verify for a remote host is a
+        # credential-interception hole the daemon will not silently accept.
+        if (
+            self.qbt_use_https
+            and not self.qbt_verify_ssl
+            and not self.qbt_ca_bundle
+            and self.qbt_host not in _LOCAL_HOSTS
+        ):
+            raise ConfigError(
+                "qbt_verify_ssl=false is not allowed for remote hosts without qbt_ca_bundle. "
+                "Either pin a CA bundle or set qbt_verify_ssl=true."
+            )
 
     def __repr__(self) -> str:
         """Return representation with masked credentials."""
@@ -176,7 +175,6 @@ class Config:
             else:
                 raise ConfigError(f"Configuration file not found: {path}")
 
-        # Configuration mapping: field_name -> (section, key, converter)
         field_mappings: dict[str, tuple[str, str, Callable[[Any], Any]]] = {
             # WireGuard
             "wg_interface": ("wireguard", "interface", str),
@@ -191,6 +189,7 @@ class Config:
             "qbt_port": ("qbittorrent", "port", int),
             "qbt_use_https": ("qbittorrent", "use_https", _parse_bool),
             "qbt_verify_ssl": ("qbittorrent", "verify_ssl", _parse_bool),
+            "qbt_ca_bundle": ("qbittorrent", "ca_bundle", str),
             "qbt_username": ("qbittorrent", "username", str),
             "qbt_password": ("qbittorrent", "password", str),
             "qbt_interface_binding": ("qbittorrent", "interface_binding", str),
@@ -205,19 +204,18 @@ class Config:
             "killswitch_user": ("killswitch", "user", str),
         }
 
-        # Get default values from dataclass
-        defaults = cls()
-
-        # Build kwargs with resolved values
         kwargs: dict[str, Any] = {}
         for field_name, (section, key, converter) in field_mappings.items():
-            file_value = config_data.get(section, {}).get(key)
-            default_value = getattr(defaults, field_name)
-            raw_value = cls._get_value(field_name, file_value, default_value)
-            kwargs[field_name] = converter(raw_value)
+            env_val = os.environ.get(f"QBOUNCER_{field_name.upper()}")
+            file_val = config_data.get(section, {}).get(key)
+            raw = env_val if env_val is not None else file_val
+            if raw is None:
+                continue
+            try:
+                kwargs[field_name] = converter(raw)
+            except (ValueError, TypeError) as e:
+                raise ConfigError(f"Invalid value for {field_name}: {raw!r} ({e})") from e
 
-        # Create new instance (validation happens in __post_init__)
-        # Temporarily disable validation for defaults instance
         return cls(**kwargs)
 
     @staticmethod
@@ -225,17 +223,6 @@ class Config:
         """Load configuration from TOML file."""
         try:
             with open(path, "rb") as f:
-                return tomllib.load(f)
+                return cast(dict[str, Any], tomllib.load(f))
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"Invalid TOML in config file: {e}") from e
-
-    @staticmethod
-    def _get_value(key: str, file_value: Any, default: Any) -> Any:
-        """Get configuration value with environment variable override."""
-        env_key = f"QBOUNCER_{key.upper()}"
-        env_value = os.environ.get(env_key)
-        if env_value is not None:
-            return env_value
-        if file_value is not None:
-            return file_value
-        return default

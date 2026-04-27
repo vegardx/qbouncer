@@ -33,8 +33,13 @@ port = 8080
 use_https = false
 
 # Verify SSL certificates (only applies when use_https = true)
-# Set to false for self-signed certificates
+# Set to false for self-signed certificates on loopback. For remote hosts
+# you must supply a ca_bundle instead; the daemon refuses to start otherwise.
 verify_ssl = true
+
+# Optional: path to a PEM CA bundle to verify the qBittorrent server
+# certificate against (overrides verify_ssl when set)
+# ca_bundle = "/etc/qbouncer/qbt-ca.pem"
 
 # Optional: username for Web UI authentication
 # Leave empty if authentication is disabled
