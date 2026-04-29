@@ -13,111 +13,88 @@ from .service import QBouncerService
 
 
 def setup_logging(level: str) -> None:
-    """Setup logging configuration.
-
-    Args:
-        level: Log level name (DEBUG, INFO, WARNING, ERROR)
-    """
     log_level = getattr(logging, level.upper(), logging.INFO)
-
-    # Configure root logger
     logging.basicConfig(
         level=log_level,
         format="%(levelname)s [%(name)s] %(message)s",
         stream=sys.stderr,
     )
-
-    # Set level for our loggers
     logging.getLogger("qbouncer").setLevel(log_level)
-
-    # Reduce noise from requests library
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments.
-
-    Returns:
-        Parsed arguments namespace
-    """
     parser = argparse.ArgumentParser(
         prog="qbouncer",
         description="WireGuard NAT-PMP Port Bouncer for qBittorrent",
     )
-
     parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
     )
-
     parser.add_argument(
         "-c",
         "--config",
         metavar="FILE",
         help="Path to configuration file (TOML format)",
     )
-
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable verbose (DEBUG) logging",
     )
-
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Set log level (default: INFO)",
+        default=None,
+        help="Override log level from config",
     )
-
     return parser.parse_args()
 
 
-def main() -> int:
-    """Main entry point.
+def _resolve_log_level(args: argparse.Namespace, config_level: str) -> str:
+    """CLI > config > default. --verbose beats everything."""
+    if args.verbose:
+        return "DEBUG"
+    if args.log_level is not None:
+        return str(args.log_level)
+    return config_level
 
-    Returns:
-        Exit code (0 for success, non-zero for error)
-    """
+
+def main() -> int:
     args = parse_args()
 
-    # Determine log level
-    log_level = "DEBUG" if args.verbose else args.log_level
-
-    # Setup logging early
-    setup_logging(log_level)
-
+    # Bootstrap logging at INFO so config-load errors are visible before we
+    # know the configured level. setup_logging() runs exactly once after
+    # config load, below.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s [%(name)s] %(message)s",
+        stream=sys.stderr,
+    )
     logger = logging.getLogger(__name__)
-    logger.info("Starting qbouncer %s", __version__)
 
     try:
-        # Load configuration
         config = Config.load(args.config)
-
-        # Override log level from config if not set via CLI
-        if not args.verbose and args.log_level == "INFO":
-            setup_logging(config.log_level)
-
-        # Create and run service
-        service = QBouncerService(config)
-        service.run()
-
-        return 0
-
     except ConfigError as e:
         logger.error("Configuration error: %s", e)
         return 1
 
+    setup_logging(_resolve_log_level(args, config.log_level))
+    logger.info("Starting qbouncer %s", __version__)
+
+    try:
+        service = QBouncerService(config)
+        service.run()
+        return 0
     except QBouncerError as e:
         logger.error("Service error: %s", e)
         return 1
-
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         return 130
-
     except Exception as e:
         logger.exception("Unexpected error: %s", e)
         return 1

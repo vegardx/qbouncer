@@ -5,8 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ipaddress import AddressValueError, IPv4Address
 from pathlib import Path
 from typing import Any
@@ -23,9 +22,37 @@ INTERFACE_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,14}$")
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
+# (field_name, toml_section, toml_key)
+_STR_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("wg_interface", "wireguard", "interface"),
+    ("wg_health_check_host", "wireguard", "health_check_host"),
+    ("natpmp_gateway", "natpmp", "gateway"),
+    ("qbt_host", "qbittorrent", "host"),
+    ("qbt_ca_bundle", "qbittorrent", "ca_bundle"),
+    ("qbt_username", "qbittorrent", "username"),
+    ("qbt_password", "qbittorrent", "password"),
+    ("qbt_interface_binding", "qbittorrent", "interface_binding"),
+    ("log_level", "service", "log_level"),
+    ("state_file", "service", "state_file"),
+    ("killswitch_user", "killswitch", "user"),
+)
+
+_INT_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("wg_health_check_interval", "wireguard", "health_check_interval"),
+    ("natpmp_refresh_interval", "natpmp", "refresh_interval"),
+    ("natpmp_lease_lifetime", "natpmp", "lease_lifetime"),
+    ("qbt_port", "qbittorrent", "port"),
+    ("max_consecutive_failures", "service", "max_consecutive_failures"),
+)
+
+_BOOL_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("qbt_use_https", "qbittorrent", "use_https"),
+    ("qbt_verify_ssl", "qbittorrent", "verify_ssl"),
+    ("killswitch_enabled", "killswitch", "enabled"),
+)
+
 
 def _parse_bool(value: Any) -> bool:
-    """Parse a boolean value from various formats."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -54,7 +81,7 @@ class Config:
     qbt_verify_ssl: bool = True
     qbt_ca_bundle: str = ""
     qbt_username: str = ""
-    qbt_password: str = ""
+    qbt_password: str = field(default="", repr=False)
     qbt_interface_binding: str = "wg0"
 
     # Service settings
@@ -70,21 +97,20 @@ class Config:
     killswitch_user: str = "qbittorrent"
 
     def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
         self._validate()
 
-    def _validate_iface(self, field: str, value: str) -> None:
+    def _validate_iface(self, field_name: str, value: str) -> None:
         if not INTERFACE_PATTERN.match(value):
             raise ConfigError(
-                f"Invalid {field}: {value!r}. Must start with a letter, contain only "
+                f"Invalid {field_name}: {value!r}. Must start with a letter, contain only "
                 "[a-zA-Z0-9_-], and be at most 15 characters."
             )
 
-    def _validate_ipv4(self, field: str, value: str) -> None:
+    def _validate_ipv4(self, field_name: str, value: str) -> None:
         try:
             IPv4Address(value)
         except (AddressValueError, ValueError) as e:
-            raise ConfigError(f"Invalid {field}: {value!r}") from e
+            raise ConfigError(f"Invalid {field_name}: {value!r}") from e
 
     def _validate(self) -> None:
         """Validate configuration values (pure, no I/O)."""
@@ -131,19 +157,6 @@ class Config:
                 "Either pin a CA bundle or set qbt_verify_ssl=true."
             )
 
-    def __repr__(self) -> str:
-        """Return representation with masked credentials."""
-        return (
-            f"Config("
-            f"wg_interface={self.wg_interface!r}, "
-            f"natpmp_gateway={self.natpmp_gateway!r}, "
-            f"qbt_host={self.qbt_host!r}, "
-            f"qbt_port={self.qbt_port}, "
-            f"qbt_use_https={self.qbt_use_https}, "
-            f"qbt_username={self.qbt_username!r}, "
-            f"qbt_password='***')"
-        )
-
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
         """Load configuration from file and environment variables.
@@ -152,15 +165,6 @@ class Config:
         1. Environment variables (QBOUNCER_*)
         2. Configuration file
         3. Default values
-
-        Args:
-            config_path: Optional path to TOML configuration file
-
-        Returns:
-            Configured Config instance
-
-        Raises:
-            ConfigError: If configuration is invalid
         """
         config_data: dict[str, Any] = {}
 
@@ -171,52 +175,45 @@ class Config:
             else:
                 raise ConfigError(f"Configuration file not found: {path}")
 
-        field_mappings: dict[str, tuple[str, str, Callable[[Any], Any]]] = {
-            # WireGuard
-            "wg_interface": ("wireguard", "interface", str),
-            "wg_health_check_host": ("wireguard", "health_check_host", str),
-            "wg_health_check_interval": ("wireguard", "health_check_interval", int),
-            # NAT-PMP
-            "natpmp_gateway": ("natpmp", "gateway", str),
-            "natpmp_refresh_interval": ("natpmp", "refresh_interval", int),
-            "natpmp_lease_lifetime": ("natpmp", "lease_lifetime", int),
-            # qBittorrent
-            "qbt_host": ("qbittorrent", "host", str),
-            "qbt_port": ("qbittorrent", "port", int),
-            "qbt_use_https": ("qbittorrent", "use_https", _parse_bool),
-            "qbt_verify_ssl": ("qbittorrent", "verify_ssl", _parse_bool),
-            "qbt_ca_bundle": ("qbittorrent", "ca_bundle", str),
-            "qbt_username": ("qbittorrent", "username", str),
-            "qbt_password": ("qbittorrent", "password", str),
-            "qbt_interface_binding": ("qbittorrent", "interface_binding", str),
-            # Service
-            "log_level": ("service", "log_level", str),
-            "state_file": ("service", "state_file", str),
-            "max_consecutive_failures": ("service", "max_consecutive_failures", int),
-            # Killswitch
-            "killswitch_enabled": ("killswitch", "enabled", _parse_bool),
-            "killswitch_user": ("killswitch", "user", str),
-        }
-
         kwargs: dict[str, Any] = {}
-        for field_name, (section, key, converter) in field_mappings.items():
-            env_val = os.environ.get(f"QBOUNCER_{field_name.upper()}")
-            file_val = config_data.get(section, {}).get(key)
-            raw = env_val if env_val is not None else file_val
+        for field_name, section, key in _STR_FIELDS:
+            raw = _resolve(field_name, config_data, section, key)
+            if raw is not None:
+                kwargs[field_name] = str(raw)
+
+        for field_name, section, key in _INT_FIELDS:
+            raw = _resolve(field_name, config_data, section, key)
             if raw is None:
                 continue
             try:
-                kwargs[field_name] = converter(raw)
+                kwargs[field_name] = int(raw)
             except (ValueError, TypeError) as e:
                 raise ConfigError(f"Invalid value for {field_name}: {raw!r} ({e})") from e
+
+        for field_name, section, key in _BOOL_FIELDS:
+            raw = _resolve(field_name, config_data, section, key)
+            if raw is not None:
+                kwargs[field_name] = _parse_bool(raw)
 
         return cls(**kwargs)
 
     @staticmethod
     def _load_from_file(path: Path) -> dict[str, Any]:
-        """Load configuration from TOML file."""
         try:
             with open(path, "rb") as f:
                 return tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"Invalid TOML in config file: {e}") from e
+
+
+def _resolve(
+    field_name: str,
+    config_data: dict[str, Any],
+    section: str,
+    key: str,
+) -> Any:
+    """Env var (QBOUNCER_*) > file value > None. Coercion happens in the caller."""
+    env_val = os.environ.get(f"QBOUNCER_{field_name.upper()}")
+    if env_val is not None:
+        return env_val
+    return config_data.get(section, {}).get(key)

@@ -9,7 +9,6 @@ import signal
 import socket
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
@@ -24,26 +23,14 @@ from .wireguard import WireGuardMonitor
 
 logger = logging.getLogger(__name__)
 
-# Polling and retry intervals (seconds). Not exposed as config: systemd's
-# Restart=on-failure is the durable recovery path; in-process backoff is
-# intentionally a small fixed value to bound shutdown latency.
+# Fixed intervals (seconds). systemd's Restart=on-failure is the durable
+# recovery mechanism; in-process backoff is a small fixed value to bound
+# shutdown latency.
 QBT_AVAILABILITY_POLL_INTERVAL = 5
 FAILURE_RETRY_DELAY = 30
 
 
-@dataclass
-class ServiceStateData:
-    """Tracks runtime state of the service."""
-
-    current_port: int | None = None
-    consecutive_failures: int = 0
-    last_port_refresh: datetime | None = None
-    last_vpn_check: datetime | None = None
-
-
 class ServiceState(Enum):
-    """Service state machine states."""
-
     WAITING_VPN = auto()
     WAITING_QBT = auto()
     MAPPING_PORT = auto()
@@ -56,11 +43,6 @@ class QBouncerService:
     """Main service orchestrating VPN monitoring, NAT-PMP, and qBittorrent."""
 
     def __init__(self, config: Config) -> None:
-        """Initialize the service.
-
-        Args:
-            config: Service configuration
-        """
         self.config = config
         self.state = ServiceState.WAITING_VPN
         self._shutdown_event = threading.Event()
@@ -83,7 +65,10 @@ class QBouncerService:
             ca_bundle=config.qbt_ca_bundle,
         )
 
-        self.state_data = ServiceStateData()
+        self.current_port: int | None = None
+        self.consecutive_failures = 0
+        self.last_port_refresh: datetime | None = None
+        self.last_vpn_check: datetime | None = None
 
         self.killswitch: KillswitchManager | None = None
         if config.killswitch_enabled:
@@ -117,6 +102,7 @@ class QBouncerService:
         if not notify_socket:
             return
         try:
+            # Linux abstract namespace sockets: leading '@' → leading NUL byte.
             if notify_socket.startswith("@"):
                 notify_socket = "\0" + notify_socket[1:]
             with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
@@ -137,16 +123,16 @@ class QBouncerService:
             with open(state_path) as f:
                 data = json.load(f)
 
-            self.state_data.current_port = data.get("last_port")
-            self.state_data.consecutive_failures = int(data.get("consecutive_failures", 0))
+            self.current_port = data.get("last_port")
+            self.consecutive_failures = int(data.get("consecutive_failures", 0))
             if data.get("last_refresh"):
-                self.state_data.last_port_refresh = datetime.fromisoformat(data["last_refresh"])
+                self.last_port_refresh = datetime.fromisoformat(data["last_refresh"])
 
             logger.info(
                 "Loaded state: last_port=%s, last_refresh=%s, failures=%d",
-                self.state_data.current_port,
-                self.state_data.last_port_refresh,
-                self.state_data.consecutive_failures,
+                self.current_port,
+                self.last_port_refresh,
+                self.consecutive_failures,
             )
 
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
@@ -158,11 +144,9 @@ class QBouncerService:
 
         data = {
             "version": 1,
-            "last_port": self.state_data.current_port,
-            "last_refresh": self.state_data.last_port_refresh.isoformat()
-            if self.state_data.last_port_refresh
-            else None,
-            "consecutive_failures": self.state_data.consecutive_failures,
+            "last_port": self.current_port,
+            "last_refresh": self.last_port_refresh.isoformat() if self.last_port_refresh else None,
+            "consecutive_failures": self.consecutive_failures,
         }
 
         tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
@@ -233,7 +217,7 @@ class QBouncerService:
         logger.info("Waiting for WireGuard interface %s", self.config.wg_interface)
         if self.wg_monitor.is_healthy():
             logger.info("WireGuard VPN is healthy")
-            self.state_data.consecutive_failures = 0
+            self.consecutive_failures = 0
             self.state = ServiceState.WAITING_QBT
         else:
             self._sleep(self.config.wg_health_check_interval)
@@ -243,7 +227,7 @@ class QBouncerService:
         if self.qbt_client.is_reachable():
             version = self.qbt_client.get_version()
             logger.info("qBittorrent is available (version: %s)", version)
-            self.state_data.consecutive_failures = 0
+            self.consecutive_failures = 0
             self.state = ServiceState.MAPPING_PORT
         else:
             self._sleep(QBT_AVAILABILITY_POLL_INTERVAL)
@@ -251,16 +235,16 @@ class QBouncerService:
     def _request_port_mapping(self) -> None:
         logger.debug("Requesting NAT-PMP port mapping")
         try:
-            old_port = self.state_data.current_port
+            old_port = self.current_port
             new_port = self.natpmp_manager.refresh_mapping()
         except NatPmpError as e:
             logger.error("NAT-PMP error: %s", e)
             self.state = ServiceState.WAITING_VPN
             raise
 
-        self.state_data.current_port = new_port
-        self.state_data.last_port_refresh = datetime.now(timezone.utc)
-        self.state_data.consecutive_failures = 0
+        self.current_port = new_port
+        self.last_port_refresh = datetime.now(timezone.utc)
+        self.consecutive_failures = 0
 
         if old_port != new_port:
             logger.info("Port mapping obtained: %d", new_port)
@@ -275,7 +259,6 @@ class QBouncerService:
         self._save_state()
 
     def _qbt_port_matches(self, expected: int) -> bool:
-        """Return True iff qBittorrent's current listen port equals expected."""
         try:
             actual = self.qbt_client.get_listening_port()
         except QBittorrentError as e:
@@ -288,7 +271,7 @@ class QBouncerService:
         return True
 
     def _configure_qbittorrent(self) -> None:
-        if self.state_data.current_port is None:
+        if self.current_port is None:
             logger.error("No port available for configuration")
             self.state = ServiceState.MAPPING_PORT
             return
@@ -298,11 +281,11 @@ class QBouncerService:
             current_interface = self.qbt_client.get_network_interface()
 
             needs_update = False
-            if current_port != self.state_data.current_port:
+            if current_port != self.current_port:
                 logger.info(
                     "qBittorrent port needs update: %d -> %d",
                     current_port,
-                    self.state_data.current_port,
+                    self.current_port,
                 )
                 needs_update = True
 
@@ -316,12 +299,12 @@ class QBouncerService:
 
             if needs_update:
                 self.qbt_client.update_port_and_interface(
-                    port=self.state_data.current_port,
+                    port=self.current_port,
                     interface=self.config.qbt_interface_binding,
                 )
                 logger.info("qBittorrent configuration updated successfully")
 
-            self.state_data.consecutive_failures = 0
+            self.consecutive_failures = 0
             self.state = ServiceState.MONITORING
 
         except QBittorrentError as e:
@@ -331,25 +314,22 @@ class QBouncerService:
     # -- monitoring transitions ----------------------------------------------
 
     def _vpn_due_transition(self, now: datetime) -> ServiceState | None:
-        """Run the periodic VPN health check; return a new state if it failed."""
-        last = self.state_data.last_vpn_check
+        last = self.last_vpn_check
         due = last is None or (now - last).total_seconds() >= self.config.wg_health_check_interval
         if not due:
             return None
         if not self.wg_monitor.is_healthy():
             logger.warning("VPN health check failed")
             return ServiceState.WAITING_VPN
-        self.state_data.last_vpn_check = now
+        self.last_vpn_check = now
         return None
 
     def _port_refresh_due_transition(self, now: datetime) -> ServiceState | None:
-        """Trigger a port refresh if the refresh interval has elapsed."""
-        last = self.state_data.last_port_refresh
+        last = self.last_port_refresh
         due = last is None or (now - last).total_seconds() >= self.config.natpmp_refresh_interval
         return ServiceState.MAPPING_PORT if due else None
 
     def _qbt_verify_transition(self) -> ServiceState | None:
-        """Verify qBittorrent is still reachable and correctly bound."""
         try:
             if not self.qbt_client.is_reachable():
                 logger.warning("qBittorrent is no longer reachable")
@@ -363,7 +343,6 @@ class QBouncerService:
         return None
 
     def _verify_killswitch(self) -> None:
-        """Re-establish killswitch rules if external changes removed them."""
         if not self.killswitch:
             return
         if self.killswitch.verify():
@@ -376,7 +355,6 @@ class QBouncerService:
             raise
 
     def _monitor(self) -> None:
-        """Steady-state: run periodic checks, transition when something changes."""
         now = datetime.now(timezone.utc)
         for transition in (
             self._vpn_due_transition(now),
@@ -393,23 +371,22 @@ class QBouncerService:
     # -- failure handling -----------------------------------------------------
 
     def _handle_failure(self) -> None:
-        """Record a failure; back off and reset state on repeated failures.
+        """Count a failure; on repeated failures, back off and reset to WAITING_VPN.
 
-        Recovery strategy is deliberately simple: sleep FAILURE_RETRY_DELAY
-        seconds and fall back to WAITING_VPN. Persistent failures let systemd's
-        Restart=on-failure take over — it's the durable recovery mechanism.
+        systemd's Restart=on-failure is the durable recovery path — this only
+        handles transient failures that fit inside a single process lifetime.
         """
-        self.state_data.consecutive_failures += 1
-        logger.warning("Failure count: %d", self.state_data.consecutive_failures)
+        self.consecutive_failures += 1
+        logger.warning("Failure count: %d", self.consecutive_failures)
 
-        if self.state_data.consecutive_failures >= self.config.max_consecutive_failures:
+        if self.consecutive_failures >= self.config.max_consecutive_failures:
             logger.error(
                 "Max consecutive failures (%d) reached, backing off %ds before retry",
                 self.config.max_consecutive_failures,
                 FAILURE_RETRY_DELAY,
             )
             self._sleep(FAILURE_RETRY_DELAY)
-            self.state_data.consecutive_failures = 0
+            self.consecutive_failures = 0
             self.state = ServiceState.WAITING_VPN
 
     # -- shutdown -------------------------------------------------------------
@@ -419,6 +396,11 @@ class QBouncerService:
         # Save state before touching iptables so a failure there doesn't
         # lose the authoritative port/refresh record.
         self._save_state()
+
+        try:
+            self.qbt_client.logout()
+        except Exception as e:
+            logger.debug("qBittorrent logout failed (non-fatal): %s", e)
 
         if self.killswitch:
             try:

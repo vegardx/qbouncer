@@ -196,3 +196,20 @@ class QBittorrentClient:
             return True
         except QBittorrentError:
             return False
+
+    def logout(self) -> None:
+        """Invalidate the server-side session. Safe to call when not logged in."""
+        if not self._authenticated:
+            return
+        try:
+            self._send(
+                "post",
+                f"{self.base_url}/api/v2/auth/logout",
+                timeout=self.timeout,
+                verify=self._verify,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.debug("qBittorrent logout request failed: %s", e)
+        finally:
+            self._authenticated = False
+            self.session.cookies.clear()

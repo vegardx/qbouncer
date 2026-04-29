@@ -143,4 +143,4 @@ class TestCredentialMasking:
     def test_password_not_in_repr(self) -> None:
         c = Config(qbt_password="supersecret")
         assert "supersecret" not in repr(c)
-        assert "***" in repr(c)
+        assert "qbt_password" not in repr(c)

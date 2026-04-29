@@ -31,23 +31,23 @@ class TestStatePersistence:
     def test_save_then_load_roundtrip(self, service: QBouncerService) -> None:
         from datetime import datetime, timezone
 
-        service.state_data.current_port = 42123
-        service.state_data.consecutive_failures = 2
-        service.state_data.last_port_refresh = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        service.current_port = 42123
+        service.consecutive_failures = 2
+        service.last_port_refresh = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         service._save_state()
 
         on_disk = json.loads(Path(service.config.state_file).read_text())
         assert on_disk["last_port"] == 42123
         assert on_disk["consecutive_failures"] == 2
 
-        service.state_data.current_port = None
-        service.state_data.consecutive_failures = 0
-        service.state_data.last_port_refresh = None
+        service.current_port = None
+        service.consecutive_failures = 0
+        service.last_port_refresh = None
 
         service._load_state()
-        assert service.state_data.current_port == 42123
-        assert service.state_data.consecutive_failures == 2
-        assert service.state_data.last_port_refresh is not None
+        assert service.current_port == 42123
+        assert service.consecutive_failures == 2
+        assert service.last_port_refresh is not None
 
     def test_load_ignores_corrupt_json(
         self, service: QBouncerService, caplog: pytest.LogCaptureFixture
@@ -55,7 +55,7 @@ class TestStatePersistence:
         Path(service.config.state_file).write_text("{not json}")
         with caplog.at_level("WARNING"):
             service._load_state()
-        assert service.state_data.current_port is None
+        assert service.current_port is None
         assert any("Failed to load state file" in r.getMessage() for r in caplog.records)
 
     def test_load_ignores_bad_iso_date(
@@ -69,7 +69,7 @@ class TestStatePersistence:
         assert any("Failed to load state file" in r.getMessage() for r in caplog.records)
 
     def test_save_creates_file_with_mode_0600(self, service: QBouncerService) -> None:
-        service.state_data.current_port = 1234
+        service.current_port = 1234
         service._save_state()
         mode = Path(service.config.state_file).stat().st_mode & 0o777
         assert mode == 0o600
@@ -78,10 +78,10 @@ class TestStatePersistence:
 class TestStateTransitions:
     def test_wait_for_vpn_transitions_when_healthy(self, service: QBouncerService) -> None:
         service.wg_monitor.is_healthy = MagicMock(return_value=True)
-        service.state_data.consecutive_failures = 3
+        service.consecutive_failures = 3
         service._wait_for_vpn()
         assert service.state == ServiceState.WAITING_QBT
-        assert service.state_data.consecutive_failures == 0
+        assert service.consecutive_failures == 0
 
     def test_wait_for_vpn_sleeps_when_unhealthy(self, service: QBouncerService) -> None:
         service.wg_monitor.is_healthy = MagicMock(return_value=False)
@@ -92,15 +92,15 @@ class TestStateTransitions:
 
     def test_request_mapping_new_port_configures(self, service: QBouncerService) -> None:
         service.natpmp_manager.refresh_mapping = MagicMock(return_value=5555)
-        service.state_data.current_port = 4444
+        service.current_port = 4444
         service._request_port_mapping()
-        assert service.state_data.current_port == 5555
+        assert service.current_port == 5555
         assert service.state == ServiceState.CONFIGURING
 
     def test_request_mapping_unchanged_monitors(self, service: QBouncerService) -> None:
         service.natpmp_manager.refresh_mapping = MagicMock(return_value=5555)
         service.qbt_client.get_listening_port = MagicMock(return_value=5555)
-        service.state_data.current_port = 5555
+        service.current_port = 5555
         service._request_port_mapping()
         assert service.state == ServiceState.MONITORING
 
@@ -109,7 +109,7 @@ class TestStateTransitions:
     ) -> None:
         service.natpmp_manager.refresh_mapping = MagicMock(return_value=5555)
         service.qbt_client.get_listening_port = MagicMock(return_value=9999)  # drift
-        service.state_data.current_port = 5555
+        service.current_port = 5555
         service._request_port_mapping()
         assert service.state == ServiceState.CONFIGURING
 
@@ -120,7 +120,7 @@ class TestStateTransitions:
         assert service.state == ServiceState.WAITING_VPN
 
     def test_configure_qbittorrent_updates_on_mismatch(self, service: QBouncerService) -> None:
-        service.state_data.current_port = 5555
+        service.current_port = 5555
         service.qbt_client.get_listening_port = MagicMock(return_value=0)
         service.qbt_client.get_network_interface = MagicMock(return_value="")
         service.qbt_client.update_port_and_interface = MagicMock()
@@ -131,7 +131,7 @@ class TestStateTransitions:
         assert service.state == ServiceState.MONITORING
 
     def test_configure_qbittorrent_qbt_error_raises(self, service: QBouncerService) -> None:
-        service.state_data.current_port = 5555
+        service.current_port = 5555
         service.qbt_client.get_listening_port = MagicMock(side_effect=QBittorrentError("boom"))
         with pytest.raises(QBittorrentError):
             service._configure_qbittorrent()
@@ -140,13 +140,13 @@ class TestStateTransitions:
 class TestFailureHandling:
     def test_increments_failure_counter(self, service: QBouncerService) -> None:
         service._handle_failure()
-        assert service.state_data.consecutive_failures == 1
+        assert service.consecutive_failures == 1
 
     def test_resets_to_waiting_vpn_at_threshold(self, service: QBouncerService) -> None:
-        service.state_data.consecutive_failures = service.config.max_consecutive_failures - 1
+        service.consecutive_failures = service.config.max_consecutive_failures - 1
         with patch.object(service, "_sleep"):
             service._handle_failure()
-        assert service.state_data.consecutive_failures == 0
+        assert service.consecutive_failures == 0
         assert service.state == ServiceState.WAITING_VPN
 
 
@@ -190,3 +190,10 @@ class TestMonitorTransitions:
     ) -> None:
         service.qbt_client.is_reachable = MagicMock(return_value=False)
         assert service._qbt_verify_transition() == ServiceState.WAITING_QBT
+
+
+class TestCleanupCallsLogout:
+    def test_cleanup_calls_qbt_logout(self, service: QBouncerService) -> None:
+        service.qbt_client.logout = MagicMock()
+        service._cleanup()
+        service.qbt_client.logout.assert_called_once()
