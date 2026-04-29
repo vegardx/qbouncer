@@ -67,14 +67,14 @@ The installer is idempotent and can be run multiple times safely to upgrade or r
 
 ```bash
 # Install system dependencies (Debian/Ubuntu)
-apt install python3 python3-venv libnatpmp1 wireguard-tools
+apt install python3 python3-venv libnatpmp1 wireguard-tools iptables git
 
 # Clone the repository
 git clone https://github.com/vegardx/qbouncer.git
 cd qbouncer
 
-# Create service user
-useradd -r -s /usr/sbin/nologin qbouncer
+# Create service user and matching group
+useradd -r -U -s /usr/sbin/nologin qbouncer
 
 # Create installation directory and virtual environment
 mkdir -p /opt/qbouncer
@@ -83,11 +83,13 @@ python3 -m venv /opt/qbouncer/venv
 # Install qbouncer into the virtual environment
 /opt/qbouncer/venv/bin/pip install .
 
-# Setup configuration
+# Setup configuration (readable by the service user's group)
 mkdir -p /etc/qbouncer
 cp config/qbouncer.toml.example /etc/qbouncer/qbouncer.toml
-chmod 600 /etc/qbouncer/qbouncer.toml
-nano /etc/qbouncer/qbouncer.toml
+chown root:qbouncer /etc/qbouncer /etc/qbouncer/qbouncer.toml
+chmod 750 /etc/qbouncer
+chmod 640 /etc/qbouncer/qbouncer.toml
+$EDITOR /etc/qbouncer/qbouncer.toml
 
 # Install and enable systemd service
 cp systemd/qbouncer.service /etc/systemd/system/
@@ -109,34 +111,37 @@ service user without prompting.
 
 Configuration file: `/etc/qbouncer/qbouncer.toml`
 
+See [`config/qbouncer.toml.example`](config/qbouncer.toml.example) for the
+full list of options with inline documentation. Minimal working config:
+
 ```toml
 [wireguard]
 interface = "wg0"
 health_check_host = "10.2.0.1"
-health_check_interval = 30
 
 [natpmp]
 gateway = "10.2.0.1"
-refresh_interval = 60
-lease_lifetime = 120
 
 [qbittorrent]
 host = "localhost"
 port = 8080
-# use_https = false
-# verify_ssl = true
-# username = "admin"
-# password = "secret"
+username = "admin"
+# password = ""              # See "Credentials" below for the safer options
 interface_binding = "wg0"
 
-[service]
-log_level = "INFO"
-state_file = "/var/lib/qbouncer/state.json"
+[killswitch]
+enabled = false               # Set true + user = "..." to enable the killswitch
 ```
+
+Notable options documented in the example but worth calling out:
+`qbt_use_https` + `qbt_ca_bundle` for a CA-pinned HTTPS connection to
+qBittorrent, `availability_poll_interval` / `failure_retry_delay` to tune
+cadence, and `[killswitch]` to enable the iptables/ip6tables killswitch.
 
 ### Environment Variables
 
-All configuration options can be overridden via environment variables with the `QBOUNCER_` prefix:
+Every `Config` field has a `QBOUNCER_<FIELD_NAME_UPPER>` env var that
+overrides the TOML value. Examples:
 
 ```bash
 QBOUNCER_WG_INTERFACE=wg0
@@ -144,6 +149,22 @@ QBOUNCER_NATPMP_GATEWAY=10.2.0.1
 QBOUNCER_QBT_PORT=8080
 QBOUNCER_LOG_LEVEL=DEBUG
 ```
+
+### Credentials
+
+Three ways to supply the qBittorrent password, in increasing preference:
+
+1. **In the TOML file** — convenient, but the secret sits on disk in a
+   config directory readable by the service group.
+2. **`QBOUNCER_QBT_PASSWORD` env var** — useful for non-interactive
+   installs. Be careful not to leak it into shell history.
+3. **`QBOUNCER_QBT_PASSWORD_FILE` env var** (recommended) — points at a
+   file whose first line is the password. The systemd unit ships with a
+   commented-out `LoadCredential=qbt_password:/etc/qbouncer/credentials/qbt_password`
+   line + matching `Environment=QBOUNCER_QBT_PASSWORD_FILE=%d/qbt_password`.
+   Uncomment both, write the password to that file (mode `0600`), and
+   the daemon reads it through systemd's per-service credentials tmpfs.
+   This path beats both of the above when set.
 
 ## Usage
 
@@ -172,8 +193,14 @@ systemctl stop qbouncer
 # Run with custom config file
 /opt/qbouncer/venv/bin/qbouncer --config /path/to/config.toml
 
-# Run with verbose logging
+# Override the log level (DEBUG, INFO, WARNING, ERROR)
+/opt/qbouncer/venv/bin/qbouncer --log-level DEBUG
+
+# Shortcut for --log-level DEBUG
 /opt/qbouncer/venv/bin/qbouncer -v
+
+# Print version and exit
+/opt/qbouncer/venv/bin/qbouncer --version
 ```
 
 ## How It Works
@@ -188,35 +215,40 @@ systemctl stop qbouncer
 ```mermaid
 sequenceDiagram
     participant S as qbouncer
+    participant KS as iptables/ip6tables
     participant WG as WireGuard
     participant NAT as NAT-PMP Gateway
     participant QB as qBittorrent
 
-    loop Health Check
+    Note over S,KS: On startup (if killswitch enabled)
+    S->>KS: Install chain + jump (fail-closed)
+
+    loop Wait for VPN
         S->>WG: Check interface UP?
-        WG-->>S: UP with IP
-        S->>WG: Ping gateway
-        WG-->>S: Reachable
+        S->>WG: Ping gateway via iface
     end
 
     S->>QB: Check API available?
     QB-->>S: OK (version)
 
-    loop Port Refresh (every 60s)
-        S->>NAT: Request TCP mapping
+    loop Steady state
+        S->>NAT: Request TCP + UDP mapping
         NAT-->>S: Public port 12345
-        S->>NAT: Request UDP mapping
-        NAT-->>S: Public port 12345
-        
-        alt Port changed
-            S->>QB: Set listen_port=12345
-            S->>QB: Set interface=wg0
+
+        alt Port or interface drift
+            S->>QB: Set listen_port=12345, interface=wg0
             QB-->>S: OK
         end
+
+        S->>WG: Periodic health check
+        S->>QB: Verify reachable + still bound to iface
+        S->>KS: Verify chain + jump still present
     end
 
-    Note over S: On SIGTERM/SIGINT
-    S->>S: Save state & exit
+    Note over S,KS: On SIGTERM/SIGINT
+    S->>S: Save state
+    S->>QB: Logout (invalidate session)
+    S->>KS: Tear down chain + jump
 ```
 
 ## Troubleshooting
@@ -244,9 +276,17 @@ natpmpc -a 1 0 tcp 60 -g 10.2.0.1
 ### Check if qBittorrent API is accessible
 
 ```bash
-# Get current preferences
-curl http://localhost:8080/api/v2/app/preferences | jq .listen_port
+# Log in (replace with your credentials) and keep the session cookie
+curl -c /tmp/qbt.cookies -d 'username=admin&password=yourpass' \
+    http://localhost:8080/api/v2/auth/login
+
+# Now query with the cookie
+curl -b /tmp/qbt.cookies http://localhost:8080/api/v2/app/preferences \
+    | jq .listen_port
 ```
+
+If the Web UI has authentication disabled (it does by default on localhost),
+drop the first call and just hit `/api/v2/app/preferences` directly.
 
 ### View service logs
 
