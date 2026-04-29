@@ -47,12 +47,19 @@ verify_ssl = true
 
 # Optional: password for Web UI authentication
 # Leave empty if authentication is disabled
-# Can also be set via QBOUNCER_QBT_PASSWORD environment variable
+# Can also be set via QBOUNCER_QBT_PASSWORD environment variable.
+# For credential-manager integration, set QBOUNCER_QBT_PASSWORD_FILE to
+# a file path (e.g. a systemd LoadCredential= mount); the daemon reads
+# the first line as the password. That beats both this file and the
+# QBOUNCER_QBT_PASSWORD env var.
 # password = ""
 
 # Network interface qBittorrent should bind to
 # This ensures torrent traffic goes through the VPN
 interface_binding = "wg0"
+
+# How often (seconds) to re-probe qBittorrent while waiting for the Web UI
+# availability_poll_interval = 5
 
 [service]
 # Log level: DEBUG, INFO, WARNING, ERROR
@@ -64,6 +71,10 @@ state_file = "/var/lib/qbouncer/state.json"
 # Maximum consecutive failures before backing off and resetting to
 # WAITING_VPN (systemd's Restart=on-failure handles persistent crashes).
 max_consecutive_failures = 5
+
+# Seconds to sleep after max_consecutive_failures before retrying from
+# WAITING_VPN. Short by design — long waits belong to systemd.
+# failure_retry_delay = 30
 
 [killswitch]
 # Enable iptables killswitch to prevent traffic leaks outside VPN

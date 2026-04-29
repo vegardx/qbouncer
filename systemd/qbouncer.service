@@ -8,6 +8,13 @@ Wants=network-online.target
 Type=notify
 ExecStart=/opt/qbouncer/venv/bin/qbouncer --config /etc/qbouncer/qbouncer.toml
 
+# Optional credential-manager integration. Drop a file at
+# /etc/qbouncer/credentials/qbt_password (mode 0600) and uncomment both
+# lines below; qbouncer reads the file instead of the plaintext password
+# in qbouncer.toml. Leave commented to use the password from config/env.
+# LoadCredential=qbt_password:/etc/qbouncer/credentials/qbt_password
+# Environment=QBOUNCER_QBT_PASSWORD_FILE=%d/qbt_password
+
 # Watchdog configuration
 WatchdogSec=90
 Restart=on-failure

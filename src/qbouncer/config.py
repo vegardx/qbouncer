@@ -42,7 +42,9 @@ _INT_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("natpmp_refresh_interval", "natpmp", "refresh_interval"),
     ("natpmp_lease_lifetime", "natpmp", "lease_lifetime"),
     ("qbt_port", "qbittorrent", "port"),
+    ("qbt_availability_poll_interval", "qbittorrent", "availability_poll_interval"),
     ("max_consecutive_failures", "service", "max_consecutive_failures"),
+    ("failure_retry_delay", "service", "failure_retry_delay"),
 )
 
 _BOOL_FIELDS: tuple[tuple[str, str, str], ...] = (
@@ -83,6 +85,8 @@ class Config:
     qbt_username: str = ""
     qbt_password: str = field(default="", repr=False)
     qbt_interface_binding: str = "wg0"
+    # How often to probe qBittorrent reachability during WAITING_QBT.
+    qbt_availability_poll_interval: int = 5
 
     # Service settings
     log_level: str = "INFO"
@@ -91,6 +95,7 @@ class Config:
     # Failure handling — systemd restarts the service on persistent failure,
     # so keep recovery policy simple: count N failures, then back off briefly.
     max_consecutive_failures: int = 5
+    failure_retry_delay: int = 30
 
     # Killswitch settings
     killswitch_enabled: bool = False
@@ -136,6 +141,10 @@ class Config:
 
         if self.max_consecutive_failures < 1:
             raise ConfigError("max_consecutive_failures must be at least 1")
+        if self.qbt_availability_poll_interval < 1:
+            raise ConfigError("qbt_availability_poll_interval must be at least 1 second")
+        if self.failure_retry_delay < 1:
+            raise ConfigError("failure_retry_delay must be at least 1 second")
 
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
         if self.log_level.upper() not in valid_levels:
@@ -194,6 +203,18 @@ class Config:
             raw = _resolve(field_name, config_data, section, key)
             if raw is not None:
                 kwargs[field_name] = _parse_bool(raw)
+
+        # Secret indirection: QBOUNCER_QBT_PASSWORD_FILE beats both the TOML
+        # password and QBOUNCER_QBT_PASSWORD. This is what systemd LoadCredential=
+        # points at — the file is created per-service in a tmpfs.
+        password_file = os.environ.get("QBOUNCER_QBT_PASSWORD_FILE")
+        if password_file:
+            try:
+                kwargs["qbt_password"] = Path(password_file).read_text().rstrip("\n")
+            except OSError as e:
+                raise ConfigError(
+                    f"Failed to read QBOUNCER_QBT_PASSWORD_FILE={password_file!r}: {e}"
+                ) from e
 
         return cls(**kwargs)
 

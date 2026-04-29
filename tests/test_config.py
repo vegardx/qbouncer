@@ -144,3 +144,34 @@ class TestCredentialMasking:
         c = Config(qbt_password="supersecret")
         assert "supersecret" not in repr(c)
         assert "qbt_password" not in repr(c)
+
+
+class TestPasswordFile:
+    def test_password_file_wins_over_env_and_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        secret_file = tmp_path / "qbt_password"
+        secret_file.write_text("file-secret\n")
+        cfg = tmp_path / "q.toml"
+        cfg.write_text('[qbittorrent]\npassword = "toml-secret"\n')
+        monkeypatch.setenv("QBOUNCER_QBT_PASSWORD", "env-secret")
+        monkeypatch.setenv("QBOUNCER_QBT_PASSWORD_FILE", str(secret_file))
+
+        c = Config.load(cfg)
+        assert c.qbt_password == "file-secret"
+
+    def test_missing_password_file_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("QBOUNCER_QBT_PASSWORD_FILE", str(tmp_path / "does-not-exist"))
+        with pytest.raises(ConfigError, match="QBOUNCER_QBT_PASSWORD_FILE"):
+            Config.load(None)
+
+    def test_password_file_trims_trailing_newline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        secret_file = tmp_path / "qbt_password"
+        secret_file.write_text("secret\n")
+        monkeypatch.setenv("QBOUNCER_QBT_PASSWORD_FILE", str(secret_file))
+        c = Config.load(None)
+        assert c.qbt_password == "secret"

@@ -23,12 +23,6 @@ from .wireguard import WireGuardMonitor
 
 logger = logging.getLogger(__name__)
 
-# Fixed intervals (seconds). systemd's Restart=on-failure is the durable
-# recovery mechanism; in-process backoff is a small fixed value to bound
-# shutdown latency.
-QBT_AVAILABILITY_POLL_INTERVAL = 5
-FAILURE_RETRY_DELAY = 30
-
 
 class ServiceState(Enum):
     WAITING_VPN = auto()
@@ -230,7 +224,7 @@ class QBouncerService:
             self.consecutive_failures = 0
             self.state = ServiceState.MAPPING_PORT
         else:
-            self._sleep(QBT_AVAILABILITY_POLL_INTERVAL)
+            self._sleep(self.config.qbt_availability_poll_interval)
 
     def _request_port_mapping(self) -> None:
         logger.debug("Requesting NAT-PMP port mapping")
@@ -383,9 +377,9 @@ class QBouncerService:
             logger.error(
                 "Max consecutive failures (%d) reached, backing off %ds before retry",
                 self.config.max_consecutive_failures,
-                FAILURE_RETRY_DELAY,
+                self.config.failure_retry_delay,
             )
-            self._sleep(FAILURE_RETRY_DELAY)
+            self._sleep(self.config.failure_retry_delay)
             self.consecutive_failures = 0
             self.state = ServiceState.WAITING_VPN
 
