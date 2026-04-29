@@ -99,8 +99,11 @@ systemctl start qbouncer
 ### Uninstallation
 
 ```bash
-./scripts/uninstall.sh
+sudo bash scripts/install.sh --uninstall
 ```
+
+Add `--purge` to remove the configuration directory, state directory, and
+service user without prompting.
 
 ## Configuration
 

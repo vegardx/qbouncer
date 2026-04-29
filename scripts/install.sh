@@ -1,24 +1,28 @@
 #!/bin/bash
 #
-# qbouncer installer
+# qbouncer installer / uninstaller.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
+# Install:
+#   curl -fsSLo install.sh https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh
+#   sudo bash install.sh
 #
-# Or with options:
-#   curl -fsSL ... | bash -s -- --wg-interface wg0 --gateway 10.2.0.1
+# Uninstall:
+#   sudo bash install.sh --uninstall
 #
-# For credentials, prefer env vars so they don't show up in `ps`:
-#   QBT_PASSWORD="secret" bash install.sh --non-interactive ...
+# Non-interactive install with credentials:
+#   QBT_PASSWORD="..." sudo -E bash install.sh --non-interactive \
+#     --wg-interface wg0 --gateway 10.2.0.1 --qbt-port 8080
 #
 
 set -euo pipefail
 umask 077
 
-# Defaults
+# Paths (both install and uninstall rely on these)
 INSTALL_DIR="/opt/qbouncer"
 CONFIG_DIR="/etc/qbouncer"
+STATE_DIR="/var/lib/qbouncer"
 SERVICE_USER="qbouncer"
+SERVICE_FILE="/etc/systemd/system/qbouncer.service"
 REPO_URL="https://github.com/vegardx/qbouncer.git"
 RELEASE=""
 
@@ -40,15 +44,13 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-step() { echo -e "\n${BLUE}${BOLD}==> $1${NC}"; }
+info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
+step()  { echo -e "\n${BLUE}${BOLD}==> $1${NC}"; }
 
 prompt() {
-    local var_name="$1"
-    local prompt_text="$2"
-    local default="$3"
+    local var_name="$1" prompt_text="$2" default="$3"
     local current_value="${!var_name:-}"
 
     if [[ -n "$current_value" ]]; then
@@ -66,8 +68,7 @@ prompt() {
 }
 
 prompt_password() {
-    local var_name="$1"
-    local prompt_text="$2"
+    local var_name="$1" prompt_text="$2"
     local current_value="${!var_name:-}"
 
     if [[ -n "$current_value" ]]; then
@@ -81,11 +82,18 @@ prompt_password() {
     printf -v "$var_name" '%s' "$value"
 }
 
+confirm() {
+    local prompt_text="$1"
+    local reply
+    read -rp "$(echo -e "${YELLOW}$prompt_text${NC} [y/N]: ")" reply
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Options:
+Install (default):
     --wg-interface NAME     WireGuard interface name (e.g., wg0)
     --gateway IP            NAT-PMP gateway IP address
     --qbt-host HOST         qBittorrent host (default: localhost)
@@ -93,64 +101,146 @@ Options:
     --qbt-username USER     qBittorrent username
     --killswitch            Enable iptables killswitch
     --killswitch-user USER  User running qBittorrent (for killswitch)
-    --release TAG           Install a specific release tag (vX.Y.Z) or branch name
+    --release TAG           Install a specific release tag or branch name
     --non-interactive       Skip prompts, use defaults/CLI args only
     --force-config          Overwrite existing configuration file
+
+Uninstall:
+    --uninstall             Remove the service, binaries, and optionally
+                            the configuration/state/user
+    --purge                 With --uninstall: remove config + state + user
+                            without prompting (equivalent to answering yes
+                            to everything)
+    --yes / -y              Auto-confirm all prompts in --uninstall flow
+
+Common:
     -h, --help              Show this help message
 
 Credentials:
-    Set QBT_PASSWORD in the environment to provide a password without an
-    interactive prompt. Passing passwords on the command line is not supported
-    because it would leak them to \`ps\`.
+    Pass QBT_PASSWORD via the environment (not the command line) so it
+    doesn't appear in 'ps'. Example:
+        QBT_PASSWORD="..." sudo -E bash $0 --non-interactive ...
 
-Examples:
-    # Interactive install
-    $0
-
-    # Non-interactive with all options
-    QBT_PASSWORD="..." $0 --non-interactive --wg-interface wg0 \\
-        --gateway 10.2.0.1 --qbt-port 8080
-
-    # Pipe from curl (consider verifying checksum first, see README)
-    curl -fsSL https://raw.githubusercontent.com/vegardx/qbouncer/main/scripts/install.sh | bash
+    Or, for credential-manager integration, leave QBT_PASSWORD unset and
+    write the password to /etc/qbouncer/credentials/qbt_password (mode
+    0600) after install. See systemd/qbouncer.service for the commented-
+    out LoadCredential= lines to enable it.
 EOF
     exit 0
 }
 
-# Parse arguments
+# -- argument parsing --------------------------------------------------------
+
+MODE="install"
 NON_INTERACTIVE=false
 FORCE_CONFIG=false
+PURGE=false
+AUTO_YES=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --wg-interface) WG_INTERFACE="$2"; shift 2 ;;
-        --gateway) WG_GATEWAY="$2"; shift 2 ;;
-        --qbt-host) QBT_HOST="$2"; shift 2 ;;
-        --qbt-port) QBT_PORT="$2"; shift 2 ;;
-        --qbt-username) QBT_USERNAME="$2"; shift 2 ;;
-        --killswitch) KILLSWITCH_ENABLED=true; shift ;;
-        --killswitch-user) KILLSWITCH_USER="$2"; shift 2 ;;
-        --release) RELEASE="$2"; shift 2 ;;
-        --non-interactive) NON_INTERACTIVE=true; shift ;;
-        --force-config) FORCE_CONFIG=true; shift ;;
-        -h|--help) usage ;;
+        --wg-interface)     WG_INTERFACE="$2"; shift 2 ;;
+        --gateway)          WG_GATEWAY="$2"; shift 2 ;;
+        --qbt-host)         QBT_HOST="$2"; shift 2 ;;
+        --qbt-port)         QBT_PORT="$2"; shift 2 ;;
+        --qbt-username)     QBT_USERNAME="$2"; shift 2 ;;
+        --killswitch)       KILLSWITCH_ENABLED=true; shift ;;
+        --killswitch-user)  KILLSWITCH_USER="$2"; shift 2 ;;
+        --release)          RELEASE="$2"; shift 2 ;;
+        --non-interactive)  NON_INTERACTIVE=true; shift ;;
+        --force-config)     FORCE_CONFIG=true; shift ;;
+        --uninstall)        MODE="uninstall"; shift ;;
+        --purge)            PURGE=true; AUTO_YES=true; shift ;;
+        -y|--yes)           AUTO_YES=true; shift ;;
+        -h|--help)          usage ;;
         *) error "Unknown option: $1" ;;
     esac
 done
 
-# Validate --release format to prevent argument injection into `git clone`.
-# Accept semver tags (with optional leading v), branch names, and full SHAs.
 if [[ -n "$RELEASE" ]]; then
     if ! [[ "$RELEASE" =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*|[A-Za-z0-9][A-Za-z0-9._/-]*)$ ]]; then
         error "Invalid --release value: $RELEASE"
     fi
 fi
 
-# Check if running as root
 if [[ $EUID -ne 0 ]]; then
     error "This script must be run as root"
 fi
 
-# Detect if running interactively
+# -- uninstall mode ----------------------------------------------------------
+
+uninstall() {
+    echo -e "${BOLD}qbouncer uninstall${NC}"
+    echo
+
+    step "Stopping service"
+    if systemctl is-active --quiet qbouncer 2>/dev/null; then
+        systemctl stop qbouncer
+        info "Service stopped"
+    fi
+    if systemctl is-enabled --quiet qbouncer 2>/dev/null; then
+        systemctl disable qbouncer
+        info "Service disabled"
+    fi
+
+    step "Removing systemd unit"
+    if [[ -f "$SERVICE_FILE" ]]; then
+        rm -f "$SERVICE_FILE"
+        systemctl daemon-reload
+        info "Removed $SERVICE_FILE"
+    fi
+
+    step "Removing installation directory"
+    if [[ -d "$INSTALL_DIR" ]]; then
+        rm -rf "$INSTALL_DIR"
+        info "Removed $INSTALL_DIR"
+    fi
+
+    step "Optional artifacts"
+    local remove_config=false remove_state=false remove_user=false
+    if $PURGE || $AUTO_YES; then
+        remove_config=true
+        remove_state=true
+        remove_user=true
+    else
+        [[ -d "$CONFIG_DIR" ]] && confirm "Remove configuration directory $CONFIG_DIR?" \
+            && remove_config=true
+        [[ -d "$STATE_DIR"  ]] && confirm "Remove state directory $STATE_DIR?" \
+            && remove_state=true
+        id "$SERVICE_USER" &>/dev/null && confirm "Remove service user $SERVICE_USER?" \
+            && remove_user=true
+    fi
+
+    if $remove_config && [[ -d "$CONFIG_DIR" ]]; then
+        rm -rf "$CONFIG_DIR"
+        info "Removed $CONFIG_DIR"
+    fi
+    if $remove_state && [[ -d "$STATE_DIR" ]]; then
+        rm -rf "$STATE_DIR"
+        info "Removed $STATE_DIR"
+    fi
+    if $remove_user && id "$SERVICE_USER" &>/dev/null; then
+        # -r removes home dir if any; -f forces even if the user is the
+        # owner of still-existing files (safe for a daemon account).
+        userdel -r -f "$SERVICE_USER" 2>/dev/null || \
+            warn "userdel $SERVICE_USER failed (user may own files elsewhere)"
+        if getent group "$SERVICE_USER" &>/dev/null; then
+            groupdel "$SERVICE_USER" 2>/dev/null || \
+                warn "Group $SERVICE_USER could not be removed (other members?)"
+        fi
+        info "Removed service user $SERVICE_USER"
+    fi
+
+    echo
+    info "Uninstallation complete"
+    exit 0
+}
+
+if [[ "$MODE" == "uninstall" ]]; then
+    uninstall
+fi
+
+# -- install mode ------------------------------------------------------------
+
 if [[ -t 0 ]] && [[ "$NON_INTERACTIVE" == "false" ]]; then
     INTERACTIVE=true
 else
@@ -177,40 +267,20 @@ check_command() {
     if command -v "$1" &>/dev/null; then
         info "$1 is installed"
         return 0
-    else
-        return 1
     fi
+    return 1
 }
 
 MISSING_DEPS=()
-
-if ! check_command python3; then
-    MISSING_DEPS+=("python3")
-fi
-
-if ! python3 -c "import venv" &>/dev/null; then
-    MISSING_DEPS+=("python3-venv")
-fi
-
-if ! check_command natpmpc; then
-    MISSING_DEPS+=("libnatpmp1")
-fi
-
-if ! check_command wg; then
-    MISSING_DEPS+=("wireguard-tools")
-fi
-
-if ! check_command iptables; then
-    MISSING_DEPS+=("iptables")
-fi
-
-if ! check_command git; then
-    MISSING_DEPS+=("git")
-fi
+check_command python3 || MISSING_DEPS+=("python3")
+python3 -c "import venv" &>/dev/null || MISSING_DEPS+=("python3-venv")
+check_command natpmpc || MISSING_DEPS+=("libnatpmp1")
+check_command wg || MISSING_DEPS+=("wireguard-tools")
+check_command iptables || MISSING_DEPS+=("iptables")
+check_command git || MISSING_DEPS+=("git")
 
 if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     warn "Missing dependencies: ${MISSING_DEPS[*]}"
-
     if command -v apt &>/dev/null; then
         info "Installing via apt..."
         apt update -qq
@@ -234,11 +304,9 @@ if [[ "$INTERACTIVE" == "true" ]]; then
     echo "Press Enter to accept defaults shown in brackets."
     echo
 
-    # Try to detect WireGuard interface
     DEFAULT_WG=$(ip -o link show | grep -oP 'wg\d+' | head -1 || echo "wg0")
     prompt WG_INTERFACE "WireGuard interface" "$DEFAULT_WG"
 
-    # Try to detect gateway from interface
     DEFAULT_GW=$(ip route show dev "$WG_INTERFACE" 2>/dev/null | grep -oP 'via \K[\d.]+' | head -1 || echo "10.2.0.1")
     prompt WG_GATEWAY "NAT-PMP gateway IP" "$DEFAULT_GW"
 
@@ -247,7 +315,6 @@ if [[ "$INTERACTIVE" == "true" ]]; then
     prompt QBT_USERNAME "qBittorrent username" ""
     prompt_password QBT_PASSWORD "qBittorrent password"
 else
-    # Non-interactive: use defaults or error if required values missing
     WG_INTERFACE="${WG_INTERFACE:-wg0}"
     WG_GATEWAY="${WG_GATEWAY:-10.2.0.1}"
     QBT_HOST="${QBT_HOST:-localhost}"
@@ -287,7 +354,6 @@ fi
 
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
 
-# Clone repository into a temp dir protected by the process umask (077 above)
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT INT TERM HUP
 
@@ -302,18 +368,16 @@ info "Installing package..."
 VERSION=$("$INSTALL_DIR/venv/bin/qbouncer" --version 2>/dev/null || echo "unknown")
 info "Installed qbouncer $VERSION"
 
-# Step 5: Configure (idempotent - preserve existing config)
+# Step 5: Configure
 step "Configuring qbouncer"
 
 mkdir -p "$CONFIG_DIR"
-
 CONFIG_FILE="$CONFIG_DIR/qbouncer.toml"
 
 if [[ -f "$CONFIG_FILE" ]]; then
     if [[ "$INTERACTIVE" == "true" ]]; then
         info "Configuration file exists"
-        read -rp "$(echo -e "${YELLOW}Overwrite existing config? [y/N]:${NC} ")" overwrite
-        if [[ "$overwrite" =~ ^[Yy]$ ]]; then
+        if confirm "Overwrite existing config?"; then
             WRITE_CONFIG=true
         else
             WRITE_CONFIG=false
@@ -330,63 +394,94 @@ else
     WRITE_CONFIG=true
 fi
 
-# Produce a TOML string-safe value: backslash-escape backslashes and
-# double-quotes; reject control characters outright.
-toml_escape() {
-    python3 -c '
-import sys
-s = sys.argv[1]
-if any(ord(c) < 0x20 for c in s):
-    sys.exit("Control characters not permitted in config values")
-sys.stdout.write(s.replace("\\\\", "\\\\\\\\").replace("\"", "\\\\\""))
-' "$1"
-}
-
 if [[ "$WRITE_CONFIG" == "true" ]]; then
-    # install(1) creates the file with restrictive perms from first open,
-    # closing the umask race between create+chmod.
+    # Create the target with restrictive perms from the first open so the
+    # password never sits in a world-readable file for a moment.
     install -o root -g "$SERVICE_USER" -m 0640 /dev/null "$CONFIG_FILE"
 
-    {
-        echo "# qbouncer configuration"
-        echo "# Generated by install.sh on $(date -Iseconds)"
-        echo
-        echo "[wireguard]"
-        echo "interface = \"$(toml_escape "$WG_INTERFACE")\""
-        echo "health_check_host = \"$(toml_escape "$WG_GATEWAY")\""
-        echo "health_check_interval = 30"
-        echo
-        echo "[natpmp]"
-        echo "gateway = \"$(toml_escape "$WG_GATEWAY")\""
-        echo "refresh_interval = 60"
-        echo "lease_lifetime = 120"
-        echo
-        echo "[qbittorrent]"
-        echo "host = \"$(toml_escape "$QBT_HOST")\""
-        echo "port = $QBT_PORT"
-        if [[ -n "$QBT_USERNAME" ]]; then
-            echo "username = \"$(toml_escape "$QBT_USERNAME")\""
-        fi
-        if [[ -n "$QBT_PASSWORD" ]]; then
-            echo "password = \"$(toml_escape "$QBT_PASSWORD")\""
-        fi
-        echo "interface_binding = \"$(toml_escape "$WG_INTERFACE")\""
-        echo
-        echo "[service]"
-        echo "log_level = \"INFO\""
-        echo "state_file = \"/var/lib/qbouncer/state.json\""
-        echo
-        echo "[killswitch]"
-        echo "enabled = $KILLSWITCH_ENABLED"
-        if [[ -n "$KILLSWITCH_USER" ]]; then
-            echo "user = \"$(toml_escape "$KILLSWITCH_USER")\""
-        fi
-    } >> "$CONFIG_FILE"
+    # Render the committed example file, substituting user values where
+    # they differ from the defaults. Handled by an inline Python script
+    # so TOML escaping and conditional fields stay correct.
+    EXAMPLE_FILE="$TEMP_DIR/qbouncer/config/qbouncer.toml.example"
+    WG_INTERFACE="$WG_INTERFACE" \
+    WG_GATEWAY="$WG_GATEWAY" \
+    QBT_HOST="$QBT_HOST" \
+    QBT_PORT="$QBT_PORT" \
+    QBT_USERNAME="$QBT_USERNAME" \
+    QBT_PASSWORD="$QBT_PASSWORD" \
+    KILLSWITCH_ENABLED="$KILLSWITCH_ENABLED" \
+    KILLSWITCH_USER="$KILLSWITCH_USER" \
+    python3 - "$EXAMPLE_FILE" "$CONFIG_FILE" <<'PYEOF'
+"""Render the shipped qbouncer.toml.example with user-supplied values."""
+import os
+import sys
+
+
+def toml_str(value: str) -> str:
+    """TOML basic-string escaping; rejects control chars to avoid format breakage."""
+    if any(ord(c) < 0x20 for c in value):
+        sys.exit("Config values cannot contain control characters")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def uncomment_assignment(text: str, key: str, value: str) -> str:
+    """Replace a commented '# key = ...' line with an uncommented one."""
+    import re
+
+    pattern = re.compile(rf'^#\s*{re.escape(key)}\s*=.*$', re.MULTILINE)
+    return pattern.sub(f"{key} = {value}", text, count=1)
+
+
+def set_assignment(text: str, key: str, value: str) -> str:
+    """Replace the first 'key = ...' line on its own line."""
+    import re
+
+    pattern = re.compile(rf'^{re.escape(key)}\s*=.*$', re.MULTILINE)
+    new_text, n = pattern.subn(f"{key} = {value}", text, count=1)
+    if n == 0:
+        sys.exit(f"Failed to find '{key} =' in template")
+    return new_text
+
+
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    text = f.read()
+
+wg = os.environ["WG_INTERFACE"]
+gw = os.environ["WG_GATEWAY"]
+
+# [wireguard]: interface, health_check_host
+text = set_assignment(text, "interface", toml_str(wg))
+text = set_assignment(text, "health_check_host", toml_str(gw))
+
+# [natpmp]: gateway
+text = set_assignment(text, "gateway", toml_str(gw))
+
+# [qbittorrent]: host, port
+text = set_assignment(text, "host", toml_str(os.environ["QBT_HOST"]))
+text = set_assignment(text, "port", os.environ["QBT_PORT"])
+
+# [qbittorrent]: interface_binding (matches "wg0" default)
+text = set_assignment(text, "interface_binding", toml_str(wg))
+
+# Optional credentials: uncomment the example's commented lines
+if os.environ.get("QBT_USERNAME"):
+    text = uncomment_assignment(text, "username", toml_str(os.environ["QBT_USERNAME"]))
+if os.environ.get("QBT_PASSWORD"):
+    text = uncomment_assignment(text, "password", toml_str(os.environ["QBT_PASSWORD"]))
+
+# [killswitch]: enabled, user
+text = set_assignment(text, "enabled", os.environ["KILLSWITCH_ENABLED"])
+if os.environ.get("KILLSWITCH_USER"):
+    text = set_assignment(text, "user", toml_str(os.environ["KILLSWITCH_USER"]))
+
+with open(dst, "w") as f:
+    f.write(text)
+PYEOF
 
     info "Configuration written to $CONFIG_FILE"
 fi
 
-# Idempotent perms (also applied when config is preserved)
 chown root:"$SERVICE_USER" "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
 chown root:"$SERVICE_USER" "$CONFIG_FILE"
@@ -399,8 +494,7 @@ unset QBT_PASSWORD
 # Step 6: Install systemd service (idempotent)
 step "Installing systemd service"
 
-install -m 0644 "$TEMP_DIR/qbouncer/systemd/qbouncer.service" \
-    /etc/systemd/system/qbouncer.service
+install -m 0644 "$TEMP_DIR/qbouncer/systemd/qbouncer.service" "$SERVICE_FILE"
 systemctl daemon-reload
 info "systemd service installed"
 
@@ -415,8 +509,6 @@ else
     systemctl start qbouncer
 fi
 
-# Poll service status for up to 30 seconds (the service spends the first
-# seconds in WAITING_VPN before calling sd_notify READY=1)
 POLL_DEADLINE=$((SECONDS + 30))
 while (( SECONDS < POLL_DEADLINE )); do
     if systemctl is-active --quiet qbouncer; then
@@ -431,19 +523,16 @@ else
     warn "Service may have failed to start. Check: journalctl -u qbouncer -e"
 fi
 
-# Done
 step "Installation complete"
 
 echo
 echo -e "${GREEN}${BOLD}qbouncer has been installed successfully!${NC}"
 echo
 echo "Useful commands:"
-echo "  systemctl status qbouncer     - Check service status"
-echo "  journalctl -u qbouncer -f     - Follow logs"
+echo "  systemctl status qbouncer       - Check service status"
+echo "  journalctl -u qbouncer -f       - Follow logs"
 echo "  \$EDITOR $CONFIG_FILE  - Edit configuration"
-echo
-echo "Configuration: $CONFIG_FILE"
-echo "Logs: journalctl -u qbouncer"
+echo "  $0 --uninstall                  - Remove qbouncer"
 echo
 if [[ "$KILLSWITCH_ENABLED" != "true" ]]; then
     echo -e "${YELLOW}Optional: Killswitch${NC}"
