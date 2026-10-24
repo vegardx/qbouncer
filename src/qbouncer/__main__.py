@@ -9,6 +9,7 @@ import sys
 from . import __version__
 from .config import Config
 from .exceptions import ConfigError, QBouncerError
+from .killswitch import KillswitchManager
 from .service import QBouncerService
 
 
@@ -46,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         help="Enable verbose (DEBUG) logging",
     )
     parser.add_argument(
+        "--remove-killswitch",
+        action="store_true",
+        help="Remove the killswitch rules and exit (they stay when the service stops)",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default=None,
@@ -61,6 +67,15 @@ def _resolve_log_level(args: argparse.Namespace, config_level: str) -> str:
     if args.log_level is not None:
         return str(args.log_level)
     return config_level
+
+
+def _remove_killswitch(config: Config) -> int:
+    try:
+        KillswitchManager(vpn_interface=config.wg_interface, user=config.killswitch_user).remove()
+    except QBouncerError as e:
+        logging.getLogger(__name__).error("Failed to remove killswitch: %s", e)
+        return 1
+    return 0
 
 
 def main() -> int:
@@ -83,6 +98,10 @@ def main() -> int:
         return 1
 
     setup_logging(_resolve_log_level(args, config.log_level))
+
+    if args.remove_killswitch:
+        return _remove_killswitch(config)
+
     logger.info("Starting qbouncer %s", __version__)
 
     try:

@@ -395,10 +395,9 @@ class QBouncerService:
             logger.debug("qBittorrent logout failed (non-fatal): %s", e)
 
         if self.killswitch:
-            try:
-                self.killswitch.remove()
-            except Exception as e:
-                logger.error("Failed to remove killswitch: %s", e)
+            # Fail closed: the user's traffic stays limited to the VPN while
+            # qbouncer is stopped. `qbouncer --remove-killswitch` removes it.
+            logger.info("Killswitch left in place")
 
         self._sd_notify("STOPPING=1")
         logger.info("Shutdown complete")

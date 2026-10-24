@@ -107,6 +107,9 @@ sudo bash scripts/install.sh --uninstall
 Add `--purge` to remove the configuration directory, state directory, and
 service user without prompting.
 
+Uninstalling also removes the killswitch rules, which otherwise outlive the
+service (see [Killswitch](#killswitch)).
+
 ## Configuration
 
 Configuration file: `/etc/qbouncer/qbouncer.toml`
@@ -137,6 +140,32 @@ Notable options documented in the example but worth calling out:
 `qbt_use_https` + `qbt_ca_bundle` for a CA-pinned HTTPS connection to
 qBittorrent, `availability_poll_interval` / `failure_retry_delay` to tune
 cadence, and `[killswitch]` to enable the iptables/ip6tables killswitch.
+
+### Killswitch
+
+With `[killswitch] enabled = true`, qbouncer installs an iptables/ip6tables
+chain (`QBOUNCER-KS`) at startup, before the VPN is confirmed up. Traffic
+from the configured user may only leave through the VPN interface (and
+loopback); everything else is rejected.
+
+- **It fails closed.** The rules stay when qbouncer stops, restarts or is
+  upgraded, so qBittorrent keeps working through the VPN but can't reach
+  anything outside it. Remove them with `qbouncer --remove-killswitch`
+  (run as root, with the same config) or `install.sh --uninstall`.
+- **Rules don't survive a reboot.** Order qBittorrent after qbouncer so it
+  never starts before the rules exist. For example, as a drop-in for the
+  qBittorrent unit (`systemctl edit qbittorrent-nox@<user>`):
+
+  ```ini
+  [Unit]
+  After=qbouncer.service
+  Requires=qbouncer.service
+  ```
+
+  `Requires=` also stops qBittorrent when qbouncer is stopped by hand.
+- **DNS isn't covered.** Lookups go through the system resolver, which
+  runs as a different user. Point the resolver at the VPN's DNS server if
+  that matters.
 
 ### Environment Variables
 
@@ -248,7 +277,7 @@ sequenceDiagram
     Note over S,KS: On SIGTERM/SIGINT
     S->>S: Save state
     S->>QB: Logout (invalidate session)
-    S->>KS: Tear down chain + jump
+    Note over S,KS: Killswitch stays (fail-closed)
 ```
 
 ## Troubleshooting
