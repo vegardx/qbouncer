@@ -80,4 +80,4 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
       - name: pip-audit
-        run: uv run pip-audit --strict
+        run: uv run pip-audit --strict --skip-editable
