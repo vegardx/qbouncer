@@ -116,12 +116,46 @@ class KillswitchManager:
     def _jump_exists(self, binary: str) -> bool:
         return self._run([binary, *self._jump_spec("-C")], check=False).returncode == 0
 
-    def _render_ruleset(self, add_jump: bool) -> str:
+    def _wg_show(self, field: str) -> str:
+        result = self._run(["wg", "show", self.vpn_interface, field], check=False)
+        if result.returncode != 0:
+            raise KillswitchError(
+                f"'wg show {self.vpn_interface} {field}' failed: {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
+
+    def _tunnel_rules(self, binary: str) -> list[str]:
+        """Match fragments for the tunnel's own encrypted packets.
+
+        WireGuard's outer UDP packets can keep the owner of the socket that
+        sent the inner packet, so they reach this chain on the physical
+        interface. Without an exemption the killswitch blocks the tunnel
+        itself. wg-quick marks those packets with the interface's fwmark;
+        without one, allow UDP to the peer endpoints.
+        """
+        fwmark = self._wg_show("fwmark")
+        if fwmark and fwmark != "off":
+            return [f"-m mark --mark {fwmark}"]
+
+        want_v6 = binary == "ip6tables"
+        rules = []
+        for line in self._wg_show("endpoints").splitlines():
+            parts = line.split()
+            if len(parts) != 2 or parts[1] == "(none)":
+                continue
+            host, _, port = parts[1].rpartition(":")
+            if host.startswith("[") != want_v6:
+                continue
+            rules.append(f"-p udp -d {host.strip('[]')} --dport {port}")
+        return rules
+
+    def _render_ruleset(self, add_jump: bool, tunnel_rules: list[str]) -> str:
         """Build an iptables-save style ruleset for atomic restore.
 
         The chain is declared and flushed, then refilled, in one transaction:
         an existing jump keeps pointing at a complete chain throughout. Order
-        matters: INVALID first, loopback, the VPN interface, then REJECT.
+        matters: INVALID first, loopback, the VPN interface, the tunnel's own
+        packets, then REJECT.
         """
         chain = self.CHAIN_NAME
         lines = [
@@ -131,6 +165,7 @@ class KillswitchManager:
             f"-A {chain} -m conntrack --ctstate INVALID -j DROP",
             f"-A {chain} -o lo -j ACCEPT",
             f"-A {chain} -o {self.vpn_interface} -j ACCEPT",
+            *(f"-A {chain} {rule} -j ACCEPT" for rule in tunnel_rules),
             f"-A {chain} -j REJECT",
         ]
         if add_jump:
@@ -141,7 +176,7 @@ class KillswitchManager:
     def _apply_ruleset(self, binary: str, restore_binary: str) -> None:
         """Rebuild the chain in place, adding the OUTPUT jump only if missing."""
         add_jump = not (self._chain_exists(binary) and self._jump_exists(binary))
-        ruleset = self._render_ruleset(add_jump)
+        ruleset = self._render_ruleset(add_jump, self._tunnel_rules(binary))
         logger.debug("Applying %s ruleset:\n%s", restore_binary, ruleset)
         try:
             completed = subprocess.run(
@@ -226,6 +261,20 @@ class KillswitchManager:
             if self._run([binary, *vpn_rule], check=False).returncode != 0:
                 logger.warning("%s killswitch VPN rule missing", binary)
                 return False
+            for rule in self._tunnel_rules(binary):
+                spec = [
+                    binary,
+                    "-t",
+                    self.TABLE,
+                    "-C",
+                    self.CHAIN_NAME,
+                    *rule.split(),
+                    "-j",
+                    "ACCEPT",
+                ]
+                if self._run(spec, check=False).returncode != 0:
+                    logger.warning("%s killswitch tunnel rule missing: %s", binary, rule)
+                    return False
             reject_rule = [
                 "-t",
                 self.TABLE,

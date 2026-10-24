@@ -288,6 +288,8 @@ python3 -c "import venv" &>/dev/null || MISSING_DEPS+=("python3-venv")
 check_command natpmpc || MISSING_DEPS+=("libnatpmp1")
 check_command wg || MISSING_DEPS+=("wireguard-tools")
 check_command iptables || MISSING_DEPS+=("iptables")
+# The killswitch reads the tunnel fwmark/endpoints with `wg show`.
+check_command wg || MISSING_DEPS+=("wireguard-tools")
 check_command git || MISSING_DEPS+=("git")
 
 if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
