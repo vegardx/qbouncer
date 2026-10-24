@@ -163,6 +163,11 @@ loopback); everything else is rejected.
   ```
 
   `Requires=` also stops qBittorrent when qbouncer is stopped by hand.
+- **The tunnel's own packets are exempt.** WireGuard's encrypted UDP
+  packets can carry the uid of the process whose traffic they wrap, so the
+  chain allows packets with the interface's fwmark (`wg show <iface>
+  fwmark`, set by wg-quick), or UDP to the peer endpoints when there's no
+  fwmark. Needs `wg` from wireguard-tools.
 - **DNS isn't covered.** Lookups go through the system resolver, which
   runs as a different user. Point the resolver at the VPN's DNS server if
   that matters.

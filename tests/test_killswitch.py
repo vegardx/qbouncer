@@ -16,15 +16,26 @@ from qbouncer.service import QBouncerService
 UID = 1000
 
 
-def make_run(chain_exists: bool, jump_exists: bool) -> Any:
-    """subprocess.run stand-in: answers -L (chain) and -C OUTPUT (jump) checks."""
+def make_run(
+    chain_exists: bool,
+    jump_exists: bool,
+    fwmark: str = "0xca6c",
+    endpoints: str = "PUBKEY=\t198.51.100.7:51820",
+    tunnel_rule_exists: bool = True,
+) -> Any:
+    """subprocess.run stand-in: answers wg show, -L (chain) and -C checks."""
 
     def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         rc = 0
+        if cmd[:2] == ["wg", "show"]:
+            out = fwmark if cmd[3] == "fwmark" else endpoints
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
         if "-L" in cmd:
             rc = 0 if chain_exists else 1
         elif "-C" in cmd and "OUTPUT" in cmd:
             rc = 0 if jump_exists else 1
+        elif "-C" in cmd and ("mark" in cmd or "udp" in cmd):
+            rc = 0 if tunnel_rule_exists else 1
         elif "-D" in cmd:
             rc = 1  # nothing (left) to delete
         return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
@@ -53,9 +64,8 @@ def commands(mock_run: MagicMock) -> list[list[str]]:
 
 class TestRuleset:
     def test_rejects_last_and_allows_only_lo_and_vpn(self, manager: KillswitchManager) -> None:
-        rules = [
-            r for r in manager._render_ruleset(add_jump=False).splitlines() if r.startswith("-A")
-        ]
+        ruleset = manager._render_ruleset(add_jump=False, tunnel_rules=[])
+        rules = [r for r in ruleset.splitlines() if r.startswith("-A")]
         assert rules[-1] == "-A QBOUNCER-KS -j REJECT"
         assert "-A QBOUNCER-KS -o lo -j ACCEPT" in rules
         assert "-A QBOUNCER-KS -o wg2 -j ACCEPT" in rules
@@ -63,8 +73,43 @@ class TestRuleset:
 
     def test_jump_only_when_requested(self, manager: KillswitchManager) -> None:
         jump = f"-I OUTPUT -m owner --uid-owner {UID} -j QBOUNCER-KS"
-        assert jump in manager._render_ruleset(add_jump=True)
-        assert jump not in manager._render_ruleset(add_jump=False)
+        assert jump in manager._render_ruleset(add_jump=True, tunnel_rules=[])
+        assert jump not in manager._render_ruleset(add_jump=False, tunnel_rules=[])
+
+
+class TestTunnelExemption:
+    """The tunnel's own packets may carry the user's uid; they must get out."""
+
+    def test_uses_wg_fwmark_before_reject(
+        self, manager: KillswitchManager, fake_subprocess_run: MagicMock
+    ) -> None:
+        fake_subprocess_run.side_effect = make_run(chain_exists=False, jump_exists=False)
+        manager.setup()
+        rules = [
+            r for r in restore_inputs(fake_subprocess_run)[0].splitlines() if r.startswith("-A")
+        ]
+        mark = "-A QBOUNCER-KS -m mark --mark 0xca6c -j ACCEPT"
+        assert mark in rules
+        assert rules.index(mark) < rules.index("-A QBOUNCER-KS -j REJECT")
+
+    def test_falls_back_to_endpoints_without_fwmark(self, manager: KillswitchManager) -> None:
+        manager._ipv6_enabled = True
+        endpoints = "A=\t198.51.100.7:51820\nB=\t[2001:db8::7]:51821\nC=\t(none)"
+        with patch.object(
+            manager,
+            "_run",
+            side_effect=make_run(True, True, fwmark="off", endpoints=endpoints),
+        ):
+            assert manager._tunnel_rules("iptables") == ["-p udp -d 198.51.100.7 --dport 51820"]
+            assert manager._tunnel_rules("ip6tables") == ["-p udp -d 2001:db8::7 --dport 51821"]
+
+    def test_verify_fails_without_tunnel_rule(
+        self, manager: KillswitchManager, fake_subprocess_run: MagicMock
+    ) -> None:
+        fake_subprocess_run.side_effect = make_run(
+            chain_exists=True, jump_exists=True, tunnel_rule_exists=False
+        )
+        assert manager.verify() is False
 
 
 class TestSetup:
