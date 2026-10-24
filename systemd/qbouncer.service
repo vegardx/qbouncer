@@ -43,6 +43,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount
+# iputils ping (the health check) calls capset and setuid to drop privileges;
+# @privileged would make both fail with EPERM and every health check fail.
+SystemCallFilter=capset setuid
 SystemCallErrorNumber=EPERM
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
