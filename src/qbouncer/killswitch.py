@@ -2,9 +2,9 @@
 
 Applies rules to both iptables (IPv4) and ip6tables (IPv6) when IPv6 is enabled
 on the host, so traffic for the configured user can only leave via the VPN
-interface. A new ruleset is applied atomically via iptables-restore so there is
-no window during rebuild where the chain is populated but the jump is missing
-(or vice versa).
+interface. The chain is rebuilt in place in one iptables-restore transaction,
+so there is never a moment without rules. The rules stay when qbouncer stops;
+only remove() takes them away.
 """
 
 from __future__ import annotations
@@ -99,37 +99,49 @@ class KillswitchManager:
         )
         return result.returncode == 0
 
-    def _render_ruleset(self, reject_target: str) -> str:
+    def _jump_spec(self, action: str) -> list[str]:
+        return [
+            "-t",
+            self.TABLE,
+            action,
+            "OUTPUT",
+            "-m",
+            "owner",
+            "--uid-owner",
+            str(self._get_uid()),
+            "-j",
+            self.CHAIN_NAME,
+        ]
+
+    def _jump_exists(self, binary: str) -> bool:
+        return self._run([binary, *self._jump_spec("-C")], check=False).returncode == 0
+
+    def _render_ruleset(self, add_jump: bool) -> str:
         """Build an iptables-save style ruleset for atomic restore.
 
-        Order is critical: INVALID first, loopback, ESTABLISHED/RELATED only on
-        the VPN interface, then VPN catch-all, then REJECT. The jump from OUTPUT
-        is installed LAST inside the same transaction so traffic never hits an
-        empty chain.
+        The chain is declared and flushed, then refilled, in one transaction:
+        an existing jump keeps pointing at a complete chain throughout. Order
+        matters: INVALID first, loopback, the VPN interface, then REJECT.
         """
-        uid = self._get_uid()
         chain = self.CHAIN_NAME
-        vpn = self.vpn_interface
         lines = [
             "*filter",
             f":{chain} - [0:0]",
             f"-F {chain}",
             f"-A {chain} -m conntrack --ctstate INVALID -j DROP",
             f"-A {chain} -o lo -j ACCEPT",
-            f"-A {chain} -o {vpn} -m state --state ESTABLISHED,RELATED -j ACCEPT",
-            f"-A {chain} -o {vpn} -j ACCEPT",
-            f"-A {chain} -j {reject_target}",
-            f"-I OUTPUT -m owner --uid-owner {uid} -j {chain}",
-            "COMMIT",
-            "",
+            f"-A {chain} -o {self.vpn_interface} -j ACCEPT",
+            f"-A {chain} -j REJECT",
         ]
+        if add_jump:
+            lines.append(f"-I OUTPUT -m owner --uid-owner {self._get_uid()} -j {chain}")
+        lines += ["COMMIT", ""]
         return "\n".join(lines)
 
     def _apply_ruleset(self, binary: str, restore_binary: str) -> None:
-        """Tear down any previous chain for this family, then atomically apply."""
-        self._teardown_family(binary)
-        reject_target = "REJECT" if binary == "iptables" else "REJECT"
-        ruleset = self._render_ruleset(reject_target)
+        """Rebuild the chain in place, adding the OUTPUT jump only if missing."""
+        add_jump = not (self._chain_exists(binary) and self._jump_exists(binary))
+        ruleset = self._render_ruleset(add_jump)
         logger.debug("Applying %s ruleset:\n%s", restore_binary, ruleset)
         try:
             completed = subprocess.run(
@@ -151,23 +163,9 @@ class KillswitchManager:
             raise KillswitchError(f"{restore_binary} command not found") from e
 
     def _teardown_family(self, binary: str) -> None:
-        """Remove jump rule first, then flush+delete chain. Idempotent."""
-        uid = self._get_uid()
-        jump_spec = [
-            "-t",
-            self.TABLE,
-            "-D",
-            "OUTPUT",
-            "-m",
-            "owner",
-            "--uid-owner",
-            str(uid),
-            "-j",
-            self.CHAIN_NAME,
-        ]
-        # Remove jumps first (fail-closed-ish: traffic stops going through our chain)
+        """Remove the jump rule(s), then flush and delete the chain. Idempotent."""
         for _ in range(16):  # defensively handle administrator-added duplicates
-            result = self._run([binary, *jump_spec], check=False)
+            result = self._run([binary, *self._jump_spec("-D")], check=False)
             if result.returncode != 0:
                 break
 
@@ -192,37 +190,27 @@ class KillswitchManager:
             self._apply_ruleset(binary, restore_binary)
         logger.info("Killswitch active")
 
-    def cleanup(self) -> None:
-        """Remove all killswitch rules and chains. Safe to call multiple times."""
+    def remove(self) -> None:
+        """Remove all killswitch rules and chains. Safe to call multiple times.
+
+        Not called on shutdown: the rules stay so the user's traffic keeps
+        failing closed while qbouncer is stopped. Used by --remove-killswitch.
+        """
         logger.info("Removing killswitch rules")
         for binary, _ in self._commands():
             try:
                 self._teardown_family(binary)
             except KillswitchError as e:
-                logger.error("Failed to cleanup %s killswitch: %s", binary, e)
+                logger.error("Failed to remove %s killswitch: %s", binary, e)
         logger.info("Killswitch removed")
 
     def verify(self) -> bool:
         """Verify killswitch rules are in place for every enabled family."""
-        uid = self._get_uid()
         for binary, _ in self._commands():
             if not self._chain_exists(binary):
                 logger.warning("%s killswitch chain missing", binary)
                 return False
-            jump_spec = [
-                "-t",
-                self.TABLE,
-                "-C",
-                "OUTPUT",
-                "-m",
-                "owner",
-                "--uid-owner",
-                str(uid),
-                "-j",
-                self.CHAIN_NAME,
-            ]
-            result = self._run([binary, *jump_spec], check=False)
-            if result.returncode != 0:
+            if not self._jump_exists(binary):
                 logger.warning("%s killswitch jump rule missing", binary)
                 return False
             vpn_rule = [
