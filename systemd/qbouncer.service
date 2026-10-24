@@ -52,18 +52,14 @@ LockPersonality=yes
 
 # Required capabilities
 # CAP_NET_RAW: ping for health checks
-# CAP_NET_ADMIN: iptables for killswitch (optional feature)
+# CAP_NET_ADMIN: iptables and `wg show` for the killswitch (optional feature)
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 
 # Directories
 RuntimeDirectory=qbouncer
 StateDirectory=qbouncer
-ConfigurationDirectory=qbouncer
 ReadWritePaths=/var/lib/qbouncer
-
-# Allow reading wireguard config (for wg show)
-ReadOnlyPaths=/etc/wireguard
 
 # Logging
 StandardOutput=journal

@@ -391,7 +391,8 @@ info "Installed qbouncer $VERSION"
 # Step 5: Configure
 step "Configuring qbouncer"
 
-mkdir -p "$CONFIG_DIR"
+# The config may hold the qBittorrent password: readable by the service only.
+install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
 CONFIG_FILE="$CONFIG_DIR/qbouncer.toml"
 
 if [[ -f "$CONFIG_FILE" ]]; then
