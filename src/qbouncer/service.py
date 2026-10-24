@@ -387,8 +387,6 @@ class QBouncerService:
 
     def _cleanup(self) -> None:
         logger.info("Shutting down qbouncer service")
-        # Save state before touching iptables so a failure there doesn't
-        # lose the authoritative port/refresh record.
         self._save_state()
 
         try:
@@ -398,9 +396,9 @@ class QBouncerService:
 
         if self.killswitch:
             try:
-                self.killswitch.cleanup()
+                self.killswitch.remove()
             except Exception as e:
-                logger.error("Failed to cleanup killswitch: %s", e)
+                logger.error("Failed to remove killswitch: %s", e)
 
         self._sd_notify("STOPPING=1")
         logger.info("Shutdown complete")
