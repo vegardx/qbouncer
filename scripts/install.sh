@@ -102,6 +102,7 @@ Install (default):
     --killswitch            Enable iptables killswitch
     --killswitch-user USER  User running qBittorrent (for killswitch)
     --release TAG           Install a specific release tag or branch name
+                            (default: the newest release tag)
     --non-interactive       Skip prompts, use defaults/CLI args only
     --force-config          Overwrite existing configuration file
 
@@ -370,7 +371,13 @@ fi
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT INT TERM HUP
 
-GIT_REF="${RELEASE:-main}"
+# Default to the newest release tag, not main: main can be ahead of the
+# version it reports, so later upgrades of the same version get skipped.
+GIT_REF="$RELEASE"
+if [[ -z "$GIT_REF" ]]; then
+    GIT_REF=$(git ls-remote --tags --refs "$REPO_URL" 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -n 1)
+    [[ -n "$GIT_REF" ]] || { warn "No release tags found, installing main"; GIT_REF=main; }
+fi
 info "Downloading qbouncer ($GIT_REF)..."
 git clone --depth 1 --branch "$GIT_REF" "$REPO_URL" "$TEMP_DIR/qbouncer"
 
