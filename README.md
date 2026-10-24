@@ -240,7 +240,7 @@ systemctl stop qbouncer
 ## How It Works
 
 1. **VPN Monitoring**: Checks that the WireGuard interface is UP, has an IP address, and can reach the gateway
-2. **Port Mapping**: Requests TCP and UDP port mappings from the NAT-PMP gateway every 60 seconds
+2. **Port Mapping**: Requests TCP and UDP port mappings from the NAT-PMP gateway, renewing at 3/4 of the lease it grants (45 s for ProtonVPN's 60 s), or every `refresh_interval` if that's sooner
 3. **qBittorrent Sync**: If the mapped port changes, updates qBittorrent's listening port via its Web API
 4. **Interface Binding**: Verifies qBittorrent is bound to the VPN interface to prevent IP leaks
 

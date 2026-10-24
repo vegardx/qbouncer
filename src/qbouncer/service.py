@@ -318,10 +318,32 @@ class QBouncerService:
         self.last_vpn_check = now
         return None
 
+    def _refresh_interval(self) -> float:
+        """Renew at 3/4 of the granted lease, or refresh_interval if sooner.
+
+        The gateway may grant less than requested (ProtonVPN: 60s), and a
+        renewal that lands after expiry briefly drops the mapping.
+        """
+        granted = self.natpmp_manager.granted_lifetime
+        if isinstance(granted, int) and granted > 0:
+            return min(self.config.natpmp_refresh_interval, granted * 0.75)
+        return self.config.natpmp_refresh_interval
+
     def _port_refresh_due_transition(self, now: datetime) -> ServiceState | None:
         last = self.last_port_refresh
-        due = last is None or (now - last).total_seconds() >= self.config.natpmp_refresh_interval
+        due = last is None or (now - last).total_seconds() >= self._refresh_interval()
         return ServiceState.MAPPING_PORT if due else None
+
+    def _seconds_until_next_check(self, now: datetime) -> float:
+        """Sleep until whichever of the VPN check or the port refresh is due first."""
+        waits = []
+        for last, interval in (
+            (self.last_vpn_check, self.config.wg_health_check_interval),
+            (self.last_port_refresh, self._refresh_interval()),
+        ):
+            elapsed = (now - last).total_seconds() if last else interval
+            waits.append(interval - elapsed)
+        return max(1.0, min(waits))
 
     def _qbt_verify_transition(self) -> ServiceState | None:
         try:
@@ -360,7 +382,7 @@ class QBouncerService:
                 return
 
         self._verify_killswitch()
-        self._sleep(min(self.config.wg_health_check_interval, self.config.natpmp_refresh_interval))
+        self._sleep(self._seconds_until_next_check(datetime.now(timezone.utc)))
 
     # -- failure handling -----------------------------------------------------
 

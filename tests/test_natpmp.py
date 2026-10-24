@@ -95,3 +95,10 @@ class TestRefresh:
         with caplog.at_level("WARNING"):
             assert mgr.refresh_mapping() == 42123
         assert any("TCP and UDP ports differ" in r.getMessage() for r in caplog.records)
+
+    def test_records_granted_lifetime(self, fake_subprocess_run: MagicMock) -> None:
+        # The gateway grants 60s although 120s is requested.
+        fake_subprocess_run.return_value = _completed(stdout=GOOD_OUTPUT)
+        mgr = NatPmpManager("10.0.0.1", lease_lifetime=120)
+        mgr.refresh_mapping()
+        assert mgr.granted_lifetime == 60
