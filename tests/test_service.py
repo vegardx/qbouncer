@@ -197,3 +197,30 @@ class TestCleanupCallsLogout:
         service.qbt_client.logout = MagicMock()
         service._cleanup()
         service.qbt_client.logout.assert_called_once()
+
+
+class TestRenewalTiming:
+    """Renewals must land before the granted lease expires."""
+
+    def test_renews_at_three_quarters_of_granted_lease(self, service: QBouncerService) -> None:
+        service.natpmp_manager.granted_lifetime = 60
+        assert service._refresh_interval() == 45
+
+    def test_configured_interval_wins_when_shorter(self, service: QBouncerService) -> None:
+        service.config.natpmp_refresh_interval = 30
+        service.natpmp_manager.granted_lifetime = 60
+        assert service._refresh_interval() == 30
+
+    def test_uses_configured_interval_before_first_grant(self, service: QBouncerService) -> None:
+        service.natpmp_manager.granted_lifetime = None
+        assert service._refresh_interval() == service.config.natpmp_refresh_interval
+
+    def test_sleeps_until_refresh_is_due(self, service: QBouncerService) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        service.natpmp_manager.granted_lifetime = 60
+        service.last_vpn_check = now
+        service.last_port_refresh = now - timedelta(seconds=40)
+        # VPN check due in 30s, refresh due in 45 - 40 = 5s.
+        assert service._seconds_until_next_check(now) == pytest.approx(5)

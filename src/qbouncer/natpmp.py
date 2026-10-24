@@ -32,9 +32,12 @@ class NatPmpManager:
         """
         self.gateway = gateway
         self.lease_lifetime = lease_lifetime
+        # What the gateway actually granted on the last refresh. ProtonVPN
+        # grants 60s whatever is requested.
+        self.granted_lifetime: int | None = None
 
-    def _request(self, protocol: str) -> int:
-        """Request a port mapping for a single protocol and return the public port."""
+    def _request(self, protocol: str) -> tuple[int, int]:
+        """Request a mapping for one protocol; return (public port, granted lifetime)."""
         try:
             result = subprocess.run(
                 [
@@ -60,10 +63,14 @@ class NatPmpManager:
             logger.error("natpmpc failed: %s", result.stderr or result.stdout)
             raise NatPmpError(f"natpmpc failed with code {result.returncode}")
 
-        return self._parse_public_port(result.stdout, protocol.upper())
+        return self._parse_mapping(result.stdout, protocol.upper())
 
     def _parse_public_port(self, output: str, protocol: str) -> int:
         """Extract and validate the public port from natpmpc stdout."""
+        return self._parse_mapping(output, protocol)[0]
+
+    def _parse_mapping(self, output: str, protocol: str) -> tuple[int, int]:
+        """Extract and validate (public port, lifetime) from natpmpc stdout."""
         logger.debug("natpmpc output: %s", output)
         match = self.PORT_PATTERN.search(output)
         if not match:
@@ -87,7 +94,7 @@ class NatPmpManager:
             returned_protocol,
             lifetime,
         )
-        return public_port
+        return public_port, lifetime
 
     def refresh_mapping(self) -> int:
         """Request TCP and UDP mappings and return the public port.
@@ -95,8 +102,9 @@ class NatPmpManager:
         Raises:
             NatPmpError: If either mapping fails
         """
-        tcp_port = self._request("tcp")
-        udp_port = self._request("udp")
+        tcp_port, tcp_lifetime = self._request("tcp")
+        udp_port, udp_lifetime = self._request("udp")
+        self.granted_lifetime = min(tcp_lifetime, udp_lifetime)
 
         if tcp_port != udp_port:
             logger.warning("TCP and UDP ports differ: TCP=%d, UDP=%d", tcp_port, udp_port)
