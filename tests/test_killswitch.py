@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from qbouncer.config import Config
 from qbouncer.killswitch import KillswitchManager
+from qbouncer.service import QBouncerService
 
 UID = 1000
 
@@ -110,3 +113,17 @@ class TestRemoveAndVerify:
     ) -> None:
         fake_subprocess_run.side_effect = make_run(chain_exists=True, jump_exists=False)
         assert manager.verify() is False
+
+
+class TestShutdownLeavesRules:
+    def test_cleanup_does_not_remove_killswitch(self, tmp_path: Path) -> None:
+        cfg = Config(state_file=str(tmp_path / "state.json"), killswitch_enabled=True)
+        with (
+            patch("qbouncer.service.WireGuardMonitor"),
+            patch("qbouncer.service.NatPmpManager"),
+            patch("qbouncer.service.QBittorrentClient"),
+            patch("qbouncer.service.KillswitchManager") as ks_cls,
+        ):
+            svc = QBouncerService(cfg)
+            svc._cleanup()
+        ks_cls.return_value.remove.assert_not_called()

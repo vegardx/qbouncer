@@ -182,6 +182,17 @@ uninstall() {
         info "Service disabled"
     fi
 
+    # The killswitch outlives the service by design; remove it explicitly
+    # while the binary and config still exist.
+    step "Removing killswitch rules"
+    if [[ -x "$INSTALL_DIR/venv/bin/qbouncer" && -f "$CONFIG_DIR/qbouncer.toml" ]]; then
+        if "$INSTALL_DIR/venv/bin/qbouncer" --config "$CONFIG_DIR/qbouncer.toml" --remove-killswitch; then
+            info "Killswitch rules removed"
+        else
+            warn "Could not remove killswitch rules (chain QBOUNCER-KS); remove them by hand"
+        fi
+    fi
+
     step "Removing systemd unit"
     if [[ -f "$SERVICE_FILE" ]]; then
         rm -f "$SERVICE_FILE"
