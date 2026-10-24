@@ -80,4 +80,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
       - name: pip-audit
-        run: uv run pip-audit --strict --skip-editable
+        # Audit the pinned lock, not the environment: qbouncer itself isn't on
+        # PyPI, and --strict fails on any package it can't look up.
+        run: |
+          uv export --frozen --no-emit-project --extra dev --format requirements-txt -o requirements-audit.txt
+          uv run pip-audit --strict --disable-pip -r requirements-audit.txt
